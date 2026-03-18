@@ -73,11 +73,20 @@ info:
     ```
     [ACTIVE] ──revoke──▶ [REVOKED]
     [ACTIVE] ──expiry──▶ [EXPIRED]
+    [DISCOVERED] ──claimed──▶ [ACTIVE]
+    [DISCOVERED] ──expiry──▶ [EXPIRED]
     ```
 
     `REVOKED` represents consent withdrawal (consent records) or the Controller
     removing their registration (non-consent records). Data Providers must deny
     access for any record not in `ACTIVE` state with a future (or null) expiry.
+
+    `DISCOVERED` is a sparse, read-only state created by the DCC when it detects
+    historic meter data requests from an organisation that has not yet registered
+    as a Data User. These records are visible to Customers for transparency but
+    cannot be used to authorise data release. When the organisation onboards as
+    a Data User and registers a full access record for the same MPxN, the
+    DISCOVERED record is superseded and transitions to `ACTIVE`.
 
     ## Authentication
 
@@ -88,7 +97,7 @@ info:
 
     URI-based versioning. Current version: `v1`.
 
-  version: "0.0.8"
+  version: "0.0.9"
   contact:
     name: Auth Energy
     email: contact@auth.energy
@@ -114,6 +123,13 @@ tags:
       access record verification via access key and Data User directory lookup
       by DUID, allowing EDPs to confirm both that a specific record is active
       and that the organisation behind it is in good standing.
+  - name: DCC
+    description: >
+      Endpoints for the Smart DCC to submit discovered access records based on
+      historic meter transaction logs. Discovered records are sparse and
+      read-only — they surface to customers for transparency but cannot
+      authorise data release. They are superseded when the organisation
+      registers as a full Data User.
   - name: Webhooks
     description: >
       Endpoints for Controllers to register and manage webhook subscriptions.
@@ -165,6 +181,10 @@ paths:
 
         Historic records may be submitted — `access-event.registered-at` may predate
         `record-metadata.created-at`.
+
+        If the DCC has previously submitted a `DISCOVERED` record for the same MPxN
+        and organisation, the register will link the two records on creation. The
+        DISCOVERED record is retained for audit; the new full record becomes `ACTIVE`.
       tags:
         - Data Users
       security:
@@ -416,6 +436,13 @@ paths:
         unless filtered. Supports customer transparency — customers may request
         this list via any Controller to see who holds registered access to their
         meter point data.
+
+        `DISCOVERED` records submitted by the DCC are also returned in this
+        response, allowing customers to see organisations known to have accessed
+        their meter data historically that have not yet registered as Data Users.
+        DISCOVERED records are clearly distinguished by their `state` field and
+        contain only the sparse `discovered-access` object rather than a full
+        access record.
       tags:
         - Data Users
       security:
@@ -451,6 +478,94 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
+  # ---------------------------------------------------------------------------
+  # DCC: Discovered access records
+  # ---------------------------------------------------------------------------
+
+  /discovered-access:
+    post:
+      operationId: submitDiscoveredAccess
+      summary: Submit a Discovered Access Record
+      description: |
+        Submits a sparse, system-generated access record derived from DCC
+        historic meter transaction logs. Used when the DCC detects that an
+        organisation has been making data requests against a meter point but has
+        not yet registered as a Data User in the DAR.
+
+        Discovered records are distinct from full access records in two important
+        ways:
+
+        1. **Read-only for authorisation** — a `DISCOVERED` record cannot be
+           used by a Data Provider to authorise data release. `GET /access-records/{ak}`
+           will return the record but with `access-event.state` set to `DISCOVERED`;
+           Data Providers must treat this as a denial.
+
+        2. **Consumer transparency** — `DISCOVERED` records appear in
+           `GET /meter-points/{mpxn}/access-records` responses so customers can
+           see all parties known to have accessed their data, regardless of whether
+           those parties have formalised their registration.
+
+        When the organisation subsequently onboards as a Data User and submits a
+        full access record via `POST /access-records` for the same MPxN and
+        organisation, the register links the two records. The DISCOVERED record
+        is retained for audit; the new full record becomes `ACTIVE`.
+
+        **Authentication:** Restricted to DCC system credentials. Standard Data
+        User bearer tokens are rejected on this endpoint.
+
+        **Sparse schema:** Only the fields defined in `DiscoveredAccessRecord`
+        are accepted. The full `AccessRecord` schema is not used here — `notice`,
+        `access-event.consent`, and `processing.lia-reference` are not applicable
+        and must not be supplied.
+      tags:
+        - DCC
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DiscoveredAccessRecord"
+            example:
+              mpxn: "1234567890123"
+              organisation-name: "Acme Energy Services Ltd"
+              organisation-reference: "org_abc123def456"
+              first-seen: "2024-06-01"
+              last-seen: "2026-02-28"
+              data-types-observed:
+                - HH-CONSUMPTION
+              source-reference: "DCC-TX-LOG-2026-03-001"
+      responses:
+        "201":
+          description: Discovered access record created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SubmitDiscoveredAccessResponse"
+        "200":
+          description: >
+            Existing discovered access record updated (same mpxn and
+            organisation-reference already present).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SubmitDiscoveredAccessResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorised"
+        "403":
+          description: >
+            Caller does not hold DCC system credentials. This endpoint is not
+            accessible to standard Data User bearer tokens.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
         "500":
           $ref: "#/components/responses/InternalServerError"
 
@@ -811,10 +926,15 @@ components:
         - `EXPIRED` — the record's `expiry` has passed.
         - `REVOKED` — the Controller has removed their registration, or the customer
           has withdrawn consent. Retained for audit with `access-event.revoked-at` set.
+        - `DISCOVERED` — a sparse record created by the DCC from historic meter
+          transaction logs. The organisation has not yet registered as a Data User.
+          Visible to customers for transparency but cannot authorise data release.
+          Transitions to superseded when the organisation registers a full record.
       enum:
         - ACTIVE
         - EXPIRED
         - REVOKED
+        - DISCOVERED
 
     LegalBasis:
       type: string
@@ -1419,10 +1539,18 @@ components:
           $ref: "#/components/schemas/AccessKey"
         record-metadata:
           $ref: "#/components/schemas/RecordMetadata"
+          nullable: true
+          description: >
+            Present for full access records. Null for DISCOVERED records, which
+            carry a `discovered-access` object instead.
         legal-basis:
           $ref: "#/components/schemas/LegalBasis"
+          nullable: true
+          description: >
+            Present for full access records. Null for DISCOVERED records.
         purpose:
           type: string
+          nullable: true
           example: "Energy efficiency analysis and tariff recommendations"
         data-types:
           $ref: "#/components/schemas/DataType"
@@ -1432,11 +1560,15 @@ components:
           type: string
           format: date-time
           nullable: true
+        discovered-access:
+          nullable: true
+          description: >
+            Populated only for `DISCOVERED` records. Null for all other states.
+            Contains the sparse information derived from DCC transaction logs.
+          allOf:
+            - $ref: "#/components/schemas/DiscoveredAccessRecord"
       required:
         - ak
-        - record-metadata
-        - legal-basis
-        - purpose
         - data-types
         - state
 
@@ -1488,6 +1620,103 @@ components:
         - resource
         - timestamp
         - transaction-id
+
+    # -------------------------------------------------------------------------
+    # DCC: Discovered access schemas
+    # -------------------------------------------------------------------------
+
+    DiscoveredAccessRecord:
+      type: object
+      description: |
+        A sparse access record derived from DCC historic meter transaction logs.
+        Submitted by the DCC when it detects an organisation making data requests
+        against a meter point that has no corresponding DAR registration.
+
+        This schema is intentionally minimal — it captures only what the DCC can
+        observe from transaction logs without requiring the organisation's
+        participation. The `organisation-name` is the DCC's own record of the
+        requesting party; it is not validated against any external directory.
+
+        DISCOVERED records are visible to customers in the access record list and
+        serve as a prompt for the organisation to formalise their registration.
+        They cannot be used to authorise data release.
+      properties:
+        mpxn:
+          $ref: "#/components/schemas/MPxN"
+        organisation-name:
+          type: string
+          maxLength: 255
+          description: >
+            The name of the organisation as known to the DCC from its transaction
+            records. Not validated against the Data User directory.
+          example: "Acme Energy Services Ltd"
+        organisation-reference:
+          type: string
+          maxLength: 255
+          description: >
+            The DCC's internal identifier for this organisation. Used to link the
+            DISCOVERED record to a full access record when the organisation
+            subsequently registers as a Data User.
+          example: "org_abc123def456"
+        first-seen:
+          type: string
+          format: date
+          description: >
+            The earliest date on which the DCC observed a data request from this
+            organisation against this MPxN.
+          example: "2024-06-01"
+        last-seen:
+          type: string
+          format: date
+          description: >
+            The most recent date on which the DCC observed a data request from
+            this organisation against this MPxN.
+          example: "2026-02-28"
+        data-types-observed:
+          description: >
+            The data types the DCC observed being requested. Uses the same enum
+            as `processing.data-types` on a full access record.
+          allOf:
+            - $ref: "#/components/schemas/DataType"
+        source-reference:
+          type: string
+          maxLength: 255
+          description: >
+            The DCC's internal reference for the transaction log batch or audit
+            record from which this discovered access was derived. Retained for
+            traceability.
+          example: "DCC-TX-LOG-2026-03-001"
+        superseded-by:
+          type: string
+          readOnly: true
+          description: >
+            The access key (`ak`) of the full access record that supersedes this
+            DISCOVERED record, if the organisation has since registered. Set by
+            the register; not accepted in requests.
+          nullable: true
+          example: "ak_691df0c788ca043403b7fa90"
+      required:
+        - mpxn
+        - organisation-name
+        - organisation-reference
+        - first-seen
+        - data-types-observed
+        - source-reference
+
+    SubmitDiscoveredAccessResponse:
+      type: object
+      properties:
+        response:
+          $ref: "#/components/schemas/ResponseMetadata"
+        ak:
+          $ref: "#/components/schemas/AccessKey"
+        state:
+          $ref: "#/components/schemas/AccessState"
+          description: Will always be `DISCOVERED` for records created by this endpoint.
+      required:
+        - response
+        - ak
+        - state
 
     ErrorDetail:
       type: object
