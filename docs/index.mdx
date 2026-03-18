@@ -96,7 +96,7 @@ The Data Provider is responsible for mapping the `duid` to its own platform acce
 
 Data Users can subscribe to webhook events to manage the access record lifecycle proactively. Both events are delivered to the same callback URL; the `event-type` field distinguishes them.
 
-## Consent Withdrawal
+### Consent Withdrawal
 A Customer may withdraw consent at any time, either through the centralised customer portal (central initiated event) or through the Data User's own application. Withdrawal flows from the Customer through the Controller and Data User before the register is updated (initiated by Data User).
 On receipt of a withdrawal instruction, the Data User must call DELETE /access-records/{ak} immediately. The register transitions the record to REVOKED state and retains it for audit. The Data Provider will deny all subsequent data requests for that access key.
 <Note>If the Customer withdraws consent through the central service which they maybe contractually obligated to provide, the Controller/Data User has the opportunity to engage with the Customer and resolve any issues themselves</Note>
