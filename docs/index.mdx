@@ -10,7 +10,7 @@ tag: experimental
 
 The register is not a consent register exclusively. It records access under any lawful basis — consent, legitimate interests, public task, legal obligation, or contract. The Central Register holds the registration only; it does not validate or enforce the legal basis claimed by the Controller.
 
-<Note>The Controller and Data User may be the same entity</Note>
+<Note>The Controller and Data User may be the same entity.</Note>
 
 Key flows:
 - [Registering an Access Record](#registering-an-access-record)
@@ -21,7 +21,9 @@ Key flows:
 
 The Controller obtains lawful basis from the Customer (or asserts it internally for non-consent bases) and registers it with the Central Register via the Data User API. The register stores the record and returns an access key.
 
-For consent-based records, the Data User captures the Customer's agreement — including identity verification — before calling the register. The register stores what it is told; it does not re-verify the consent.
+For consent-based records, the Data User captures the Customer's agreement before calling the register. Identity verification must meet the standard defined in **Smart Energy Code Section I** as approved by the SEC Privacy SubCommittee. The register stores what it is told; it does not re-verify the consent.
+
+Customers can view and revoke their access records at any time via the centralised consumer portal or through the Data User's own application.
 
 ```mermaid
 sequenceDiagram
@@ -37,7 +39,7 @@ sequenceDiagram
     Controller->>Customer: Terms & purpose
     Customer->>Controller: Agreement
     Controller->>DU: Register access
-    DU->>DU: Verify Customer
+    DU->>DU: Verify Customer (SEC Section I)
     DU->>CR: POST /access-records
     activate CR
     CR->>CR: Store record
@@ -52,6 +54,8 @@ Historic records and migrations from existing consent stores can be submitted us
 ## Verifying an Access Record
 
 Before releasing meter data, the Data Provider verifies the access key and — on first encounter with a new Data User — looks up the Data User's status in the directory.
+
+Data Users are registered as **SEC Other Users**. Onboarding, accreditation, and suspension are managed through the SEC Other User process via an administration interface.
 
 ```mermaid
 sequenceDiagram
@@ -80,11 +84,11 @@ The Data Provider is responsible for mapping the `duid` to its own platform acce
 
 ## Lifecycle Notifications
 
-Controllers can subscribe to webhook events to manage the access record lifecycle proactively. Both events are delivered to the same callback URL; the `event-type` field distinguishes them.
+Data Users can subscribe to webhook events to manage the access record lifecycle proactively. Both events are delivered to the same callback URL; the `event-type` field distinguishes them.
 
 ### Consent Expiry
 
-Fired when a consent-based access record is within the configured notification window (default 30 days) of its expiry date. The Controller should prompt the Customer to renew before access lapses.
+Fired when a consent-based access record is within the configured notification window (default 30 days) of its expiry date. The Data User should prompt the Customer to renew before access lapses. Customers can also renew directly via the centralised consumer portal.
 
 ```mermaid
 sequenceDiagram
@@ -108,11 +112,12 @@ sequenceDiagram
 
 ### Change of Tenancy
 
-Fired when a Change of Tenancy is recorded against an MPxN that has one or more active access records. The Controller must cease data collection and revoke the affected records. No new occupant PII is included in the payload.
+The Central Register receives industry Change of Tenancy (CoT) events from the **DCC**. On receipt, it fires a webhook to any Data Users with active access records for the affected MPxN. The Data User, as the responsible SEC Other User, must consider this event and potentially cease data collection and revoke their registered records (noting CoT events are often false alerts). No new occupant PII is included in the payload.
 
 ```mermaid
 sequenceDiagram
     box For context
+        participant Industry as Industry (CoT Event)
         participant Controller
     end
     box In scope
@@ -120,7 +125,8 @@ sequenceDiagram
         participant CR as Central Register
     end
 
-    CR->>CR: Tenancy change recorded
+    Industry->>CR: CoT event (mpxn, effective-date)
+    CR->>CR: Match active records
     CR->>DU: tenancy.change
     DU->>Controller: Notify
     Controller->>Controller: Cease data collection
