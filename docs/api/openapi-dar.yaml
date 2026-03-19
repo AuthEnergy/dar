@@ -97,7 +97,7 @@ info:
 
     URI-based versioning. Current version: `v1`.
 
-  version: "0.0.9"
+  version: "0.0.10"
   contact:
     name: Auth Energy
     email: contact@auth.energy
@@ -130,6 +130,14 @@ tags:
       read-only — they surface to customers for transparency but cannot
       authorise data release. They are superseded when the organisation
       registers as a full Data User.
+  - name: Customer Portal
+    description: >
+      Endpoints supporting the centralised Customer Consent Portal. Data Users
+      call these endpoints to create short-lived redirect tokens that allow
+      authenticated customers to be sent to the portal in a new browser window.
+      The portal itself uses privileged server-side credentials to read and
+      revoke access records on the customer's behalf. The portal cannot be
+      embedded in an iframe.
   - name: Webhooks
     description: >
       Endpoints for Controllers to register and manage webhook subscriptions.
@@ -478,6 +486,96 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
+  # ---------------------------------------------------------------------------
+  # Customer Portal: session token issuance
+  # ---------------------------------------------------------------------------
+
+  /customer-sessions:
+    post:
+      operationId: createCustomerSession
+      summary: Create a Customer Portal Session
+      description: |
+        Issues a short-lived, single-use redirect token allowing a Data User to
+        open the centralised Customer Consent Portal for an authenticated customer.
+
+        The redirect token is URL-safe, expires in 60 seconds, and is single-use
+        — it exists solely to survive the browser redirect. On redemption, the
+        portal issues its own server-side session (stored as an `httpOnly` cookie
+        on the portal domain) with a TTL of up to 8 hours, renewable on activity.
+        The Data User never has access to the portal session.
+
+        **Portal access controls:**
+
+        The portal enforces the following independently of this endpoint:
+
+        - `X-Frame-Options: DENY` and `Content-Security-Policy: frame-ancestors 'none'`
+          are set on all portal responses. The portal cannot be embedded in an
+          iframe by any origin, including the Data User's own application.
+        - The portal session cookie is `httpOnly`, `Secure`, and `SameSite=Strict`.
+          It is not accessible to JavaScript and cannot be read or used by the
+          Data User application.
+        - The portal session is bound to the MPxN resolved at token redemption.
+          A customer cannot navigate to another customer's records within the
+          same portal session.
+        - The `return-url` is validated against the Data User's pre-registered
+          callback URLs. Unregistered URLs are rejected with `400`.
+
+        **`purpose` field:**
+
+        The `purpose` field declares the intended use of the session and is
+        recorded for audit. The portal enforces it:
+
+        - `view` — the customer can browse records but withdrawal controls are
+          not shown.
+        - `manage` — the customer can browse records and withdraw consent for
+          active consent-based records.
+
+        A Data User declaring `view` cannot cause the portal to expose withdrawal
+        controls, regardless of what the customer does in the browser.
+      tags:
+        - Customer Portal
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateCustomerSessionRequest"
+            example:
+              mpxn: "1234567890123"
+              return-url: "https://app.bright-energy.com/dashboard"
+              purpose: manage
+      responses:
+        "201":
+          description: Redirect token issued. Open `portal-url` in a new browser window.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CreateCustomerSessionResponse"
+              example:
+                response:
+                  resource: /v1/customer-sessions
+                  timestamp: "2026-03-19T10:00:00Z"
+                  transaction-id: tid_abc123def456abc123def456
+                session-token: cst_a1b2c3d4e5f6a1b2c3d4e5f6
+                expires-in: 60
+                portal-url: "https://portal.central.consent/consents?token=cst_a1b2c3d4e5f6a1b2c3d4e5f6"
+        "400":
+          description: >
+            `return-url` is not registered for this Data User, or request
+            body is malformed.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorised"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "500":
           $ref: "#/components/responses/InternalServerError"
 
@@ -1718,6 +1816,140 @@ components:
         - ak
         - state
 
+    # -------------------------------------------------------------------------
+    # Customer Portal schemas
+    # -------------------------------------------------------------------------
+
+    CustomerSessionPurpose:
+      type: string
+      description: |
+        Declares the intended use of the customer portal session. Enforced
+        by the portal — the Data User cannot cause the portal to exceed the
+        declared scope.
+
+        - `view` — customer can browse access records. Withdrawal controls
+          are not shown.
+        - `manage` — customer can browse records and withdraw consent for
+          active consent-based records.
+      enum:
+        - view
+        - manage
+
+    CreateCustomerSessionRequest:
+      type: object
+      properties:
+        mpxn:
+          $ref: "#/components/schemas/MPxN"
+        return-url:
+          type: string
+          format: uri
+          description: >
+            URL to link back to the Data User's application from the portal.
+            Must exactly match a pre-registered callback URL for this Data User.
+            If the customer withdraws a consent during the session, the portal
+            appends `?dar-action=withdrawn&ak={ak}` before redirecting, allowing
+            the application to update its UI state without waiting for the webhook.
+          example: "https://app.bright-energy.com/dashboard"
+        purpose:
+          $ref: "#/components/schemas/CustomerSessionPurpose"
+      required:
+        - mpxn
+        - return-url
+        - purpose
+
+    CreateCustomerSessionResponse:
+      type: object
+      properties:
+        response:
+          $ref: "#/components/schemas/ResponseMetadata"
+        session-token:
+          type: string
+          description: >
+            Short-lived, single-use redirect token. Embed in `portal-url` —
+            do not store or log. Expires after `expires-in` seconds or on
+            first redemption, whichever comes first.
+          example: "cst_a1b2c3d4e5f6a1b2c3d4e5f6"
+        expires-in:
+          type: integer
+          description: Redirect token lifetime in seconds from issue.
+          example: 60
+        portal-url:
+          type: string
+          format: uri
+          description: >
+            The full portal URL including the session token as a query parameter.
+            Open in a new browser window via `window.open(url, '_blank')`.
+            Valid for `expires-in` seconds.
+          example: "https://portal.central.consent/consents?token=cst_a1b2c3d4e5f6a1b2c3d4e5f6"
+      required:
+        - response
+        - session-token
+        - expires-in
+        - portal-url
+
+    # -------------------------------------------------------------------------
+    # Webhook event: consent.withdrawal payload
+    # -------------------------------------------------------------------------
+
+    ConsentWithdrawalPayload:
+      description: |
+        Payload delivered when a customer withdraws consent via the centralised
+        Customer Consent Portal.
+
+        **Timing:** The access record has already been transitioned to `REVOKED`
+        state by the portal before this event is fired. Data Users must treat
+        receipt of this event as confirmation that access has ended — not as a
+        request to end it. Any in-flight data requests against the revoked `ak`
+        will be denied by the Data Provider.
+
+        **Required action:** Data Users must update their own systems to reflect
+        the withdrawal immediately on receipt. Continued data collection after
+        receiving this event constitutes a breach of the access record terms.
+
+        **`return-url` signal:** If the customer was in a session initiated by
+        this Data User, the portal will also have appended
+        `?dar-action=withdrawn&ak={ak}` to the `return-url` at the point of
+        withdrawal. This provides an immediate UI signal in addition to the webhook.
+      allOf:
+        - $ref: "#/components/schemas/WebhookEventEnvelope"
+        - type: object
+          properties:
+            payload:
+              type: object
+              properties:
+                ak:
+                  $ref: "#/components/schemas/AccessKey"
+                mpxn:
+                  $ref: "#/components/schemas/MPxN"
+                revoked-at:
+                  type: string
+                  format: date-time
+                  description: UTC timestamp when the record was transitioned to REVOKED.
+                  example: "2026-03-19T14:32:00Z"
+                controller-reference:
+                  type: string
+                  description: >
+                    Mirrors `access-event.controller-reference` from the access
+                    record, allowing the Data User to locate the record in their
+                    own system without parsing the full access record.
+                  example: "REF-00123"
+              required:
+                - ak
+                - mpxn
+                - revoked-at
+          required:
+            - payload
+      example:
+        event-id: evt_2c3d4e5f6a1b2c3d4e5f6a1b
+        event-type: consent.withdrawal
+        occurred-at: "2026-03-19T14:32:00Z"
+        wid: wid_a1b2c3d4e5f6a1b2c3d4e5f6
+        payload:
+          ak: ak_691df0c788ca043403b7fa90
+          mpxn: "1234567890123"
+          revoked-at: "2026-03-19T14:32:00Z"
+          controller-reference: REF-00123
+
     ErrorDetail:
       type: object
       properties:
@@ -1856,9 +2088,14 @@ components:
         - `tenancy.change` — a Change of Tenancy has been recorded against an
           MPxN that has one or more `ACTIVE` access records registered under
           this Data User.
+        - `consent.withdrawal` — a customer has withdrawn consent via the
+          centralised Customer Consent Portal. The access record has already
+          transitioned to `REVOKED` state before this event is fired. Data
+          Users must update their own systems immediately on receipt.
       enum:
         - consent.expiring
         - tenancy.change
+        - consent.withdrawal
 
     WebhookRegistrationRequest:
       type: object
@@ -2234,6 +2471,34 @@ x-webhooks:
           application/json:
             schema:
               $ref: "#/components/schemas/TenancyChangePayload"
+      responses:
+        "200":
+          description: >
+            Receiver acknowledged the event. Any `2xx` response is accepted.
+
+  consent.withdrawal:
+    post:
+      operationId: onConsentWithdrawal
+      summary: Consent Withdrawal Event
+      description: |
+        Fired when a customer withdraws consent via the centralised Customer
+        Consent Portal. The access record has already transitioned to `REVOKED`
+        state before this event is dispatched.
+
+        The register POSTs this payload to the registered `callback-url`.
+        Verify the `X-DAR-Signature` header before processing.
+
+        Data Users must update their own systems immediately on receipt.
+        Continued data collection after this event is a breach of the
+        access record terms.
+      tags:
+        - Webhooks
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ConsentWithdrawalPayload"
       responses:
         "200":
           description: >
