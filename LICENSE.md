@@ -31,4 +31,4 @@ These terms are governed by the laws of England and Wales. Any disputes arising 
 
 ## Contact
 
-For licensing enquiries, please contact: legal@auth.energy
+For licensing enquiries, please contact: contact@auth.energy
