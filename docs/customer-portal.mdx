@@ -237,11 +237,3 @@ The portal only links back to URLs pre-registered for the DUID associated with t
 
 **Data Users cannot impersonate customers.**
 The portal always requires the customer to complete re-identification regardless of how the URL was formed. A Data User constructing a portal URL with a customer's `ir` or `mpxn` will be presented with a re-identification challenge they cannot complete on the customer's behalf.
-
-## Change Log
-
-| Version | Date | Summary |
-|---------|------|---------|
-| 0.0.12 | 2026-03-24 | Removed `POST /customer-sessions` endpoint. Portal now uses direct URL linking with `ir`/`mpxn` + `return` parameters. Customer re-identification via passkey, magic link, or OAuth is required before portal session is issued. |
-| 0.0.10 | 2026-03-19 | Added `purpose` field, iframe blocking, `consent.withdrawal` webhook, `dar-action` return signal, and security controls section. |
-| 0.0.9 | 2026-03-19 | Initial design draft. |

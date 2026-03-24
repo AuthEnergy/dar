@@ -207,9 +207,3 @@ After anonymisation:
 **`submitted` in `principal-verification` must always be redacted.** The register must never hold a full card number, account number, or other unredacted sensitive credential. Use masked values such as `XXXX-XXXX-XXXX-4242`.
 
 **Identity Records are scoped to the creating Data User.** A Data User cannot look up or modify Identity Records created by another Data User, even for the same MPxN.
-
-## Change Log
-
-| Version | Date | Summary |
-|---------|------|---------|
-| 0.0.12 | 2026-03-24 | Identity Records introduced. `pii-principal`, `expressed-by`, and `principal-verification` moved from `AccessRecord` / `ConsentDetails` into a separate `/identity-records` resource. Re-identification via passkey and magic link added. |
