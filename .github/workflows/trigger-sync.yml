@@ -1,0 +1,18 @@
+name: Notify main docs repo
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  trigger-sync:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Dispatch to main docs repo
+        uses: peter-evans/repository-dispatch@v3
+        with:
+          token: ${{ secrets.SYNC_PAT }}
+          repository: AuthEnergy/docs
+          event-type: dar-updated
