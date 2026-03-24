@@ -3,6 +3,7 @@ title: Identity Records
 sidebarTitle: Identity Records
 description: How the DAR separates person-property identity from access records, and how re-identification works for returning customers.
 icon: fingerprint
+tag: experimental
 ---
 
 ## Overview
@@ -98,77 +99,91 @@ Email lookup matches against the stored hash. Results are scoped to the authenti
 
 Three methods are available, in order of preference:
 
-| Method | When to use | Steps |
-|--------|-------------|-------|
-| **Passkey assertion** | Customer has a registered passkey on this device | 2-step: get challenge → submit signed assertion |
-| **Magic link** | Email stored, no passkey (or new device) | Dispatch link → poll for confirmation |
-| **Passkey registration** | No passkey registered — enrol a new one | 2-step: get challenge → submit attestation via `/credentials` |
+| Method | When to use | Flow |
+|--------|-------------|------|
+| **Passkey assertion** | Customer has a registered passkey | Redirect to `id.central.consent` → customer taps biometric → redirected back |
+| **Magic link** | Email stored, no passkey (or new device) | Register sends email → customer clicks → Data User confirms |
+| **Passkey registration** | No passkey registered — enrol a new one | Redirect to `id.central.consent` → customer registers passkey → redirected back |
 
-### Passkey Assertion (returning customer, known device)
+### Passkey Assertion (returning customer)
 
-```mermaid
-sequenceDiagram
-    participant Customer
-    participant DU as Data User
-    participant CR as Central Register
-    participant Browser
-
-    DU->>CR: POST /identity-records/{ir}/re-identify (method: passkey-assert)
-    CR->>DU: challenge + rp-id + allowed-credentials
-    DU->>Browser: navigator.credentials.get(options)
-    Browser->>Customer: Biometric / PIN prompt
-    Customer->>Browser: Confirm
-    Browser->>DU: Signed assertion
-    DU->>CR: POST /identity-records/{ir}/re-identify (method: passkey-assert-complete, assertion-response)
-    CR->>DU: verified: true
-```
-
-### Magic Link (no passkey, or new device)
+The WebAuthn ceremony always takes place on `id.central.consent` — the register's own origin — so the browser's origin checks are satisfied. The Data User initiates with a redirect and gets a confirmation token back.
 
 ```mermaid
 sequenceDiagram
     participant Customer
     participant DU as Data User
     participant CR as Central Register
+    participant ID as id.central.consent
 
-    DU->>CR: POST /identity-records/{ir}/re-identify (method: magic-link)
-    CR->>Customer: Email with signed link (15 min, single-use)
-    CR->>DU: token-ref
-    loop Poll every 3–5s
-        DU->>CR: GET /identity-records/{ir}/re-identify/{token-ref}
-        CR->>DU: status: pending
-    end
-    Customer->>CR: Click magic link
+    DU->>CR: POST /identity-records/{ir}/re-identify (passkey-assert, passkey-return-url)
+    CR->>DU: passkey.redirect-url + token-ref
+    DU->>Customer: Redirect to id.central.consent
+    Customer->>ID: Land on passkey assertion page
+    ID->>Customer: Browser passkey prompt (biometric / PIN)
+    Customer->>ID: Confirm
+    ID->>CR: Verify assertion against stored public key
+    CR->>ID: Verified
+    ID->>Customer: Redirect to passkey-return-url?dar-passkey-token={token-ref}
+    Customer->>DU: Land back in Data User app
     DU->>CR: GET /identity-records/{ir}/re-identify/{token-ref}
     CR->>DU: status: confirmed
 ```
 
-### Enrolling a New Passkey (passkey-register)
-
-Use `passkey-register` when the customer has no passkey on the record or is using a new device. This issues a registration challenge rather than an assertion challenge. Once the customer completes the ceremony, submit the credential to `POST /identity-records/{ir}/credentials`.
+### Magic Link (email fallback)
 
 ```mermaid
 sequenceDiagram
     participant Customer
     participant DU as Data User
     participant CR as Central Register
-    participant Browser
 
-    DU->>CR: POST /identity-records/{ir}/re-identify (method: passkey-register)
-    CR->>DU: registration challenge (challenge, rp-id, user-id)
-    DU->>Browser: navigator.credentials.create(options)
-    Browser->>Customer: Register passkey prompt
-    Customer->>Browser: Confirm
-    Browser->>DU: Attestation (PublicKeyCredential)
-    DU->>CR: POST /identity-records/{ir}/credentials (attestation)
-    CR->>DU: credential-id — re-identification confirmed
+    DU->>CR: POST /identity-records/{ir}/re-identify (magic-link, redirect-url)
+    CR->>Customer: Email with signed link (15 min)
+    CR->>DU: token-ref
+    Customer->>CR: Click link
+    CR->>Customer: Redirect to redirect-url?dar-reid-token={token-ref}
+    Customer->>DU: Land back in Data User app
+    DU->>CR: GET /identity-records/{ir}/re-identify/{token-ref}
+    CR->>DU: status: confirmed
+```
+
+Without a `redirect-url`, the customer lands on a confirmation page at `central.consent` and the Data User polls `GET /identity-records/{ir}/re-identify/{token-ref}` every 3–5 seconds.
+
+### Enrolling a New Passkey (passkey-register)
+
+Use `passkey-register` when the customer has no passkey on the record or is using a new device. The flow is identical to assertion but runs a WebAuthn registration ceremony instead, storing a new public key on the Identity Record before confirming.
+
+```mermaid
+sequenceDiagram
+    participant Customer
+    participant DU as Data User
+    participant CR as Central Register
+    participant ID as id.central.consent
+
+    DU->>CR: POST /identity-records/{ir}/re-identify (passkey-register, passkey-return-url)
+    CR->>DU: passkey.redirect-url + token-ref
+    DU->>Customer: Redirect to id.central.consent
+    Customer->>ID: Land on passkey registration page
+    ID->>Customer: Browser passkey registration prompt
+    Customer->>ID: Register passkey
+    ID->>CR: Store public key credential
+    CR->>ID: Stored — credential-id issued
+    ID->>Customer: Redirect to passkey-return-url?dar-passkey-token={token-ref}
+    Customer->>DU: Land back in Data User app
+    DU->>CR: GET /identity-records/{ir}/re-identify/{token-ref}
+    CR->>DU: status: confirmed
 ```
 
 ## Managing Credentials
 
+### Adding a Passkey at Identity Record Creation
+
+Set `initiate-passkey-registration: true` and supply `passkey-return-url` when calling `POST /identity-records`. The response includes a `passkey-registration-redirect` — redirect the customer immediately to complete registration on `id.central.consent`.
+
 ### Adding a Passkey After Creation
 
-If `initiate-passkey-registration` was not set at creation, use `POST /identity-records/{ir}/re-identify` with `method: passkey-register` to obtain a registration challenge, then submit the result to `POST /identity-records/{ir}/credentials`.
+Call `POST /identity-records/{ir}/re-identify` with `method: passkey-register` to initiate a registration redirect for an existing record.
 
 ### Removing a Passkey
 
@@ -180,7 +195,17 @@ If no credentials remain, passkey re-identification is unavailable. Magic link r
 
 ### Multiple Passkeys
 
-A customer may register passkeys on multiple devices — each produces a separate `credential-id`. All are stored on the same Identity Record and any can be used for assertion.
+A customer may register passkeys on multiple devices — each `passkey-register` ceremony produces a separate `credential-id`. All are stored on the same Identity Record and any can be used for assertion.
+
+## Why the Ceremony Happens on id.central.consent
+
+WebAuthn binds a passkey to the **Relying Party origin** — the domain where `navigator.credentials.create()` or `navigator.credentials.get()` is called. If the Data User's app at `app.bright-energy.com` tried to run the ceremony directly, the browser would refuse because the RP ID (`central.consent`) doesn't match the calling origin.
+
+By hosting the ceremony on `id.central.consent`, the register owns the RP entirely. This means:
+
+- Passkeys work consistently across all Data Users and on the Customer Portal
+- A customer registered a passkey through one Data User's flow can use it to authenticate on the portal directly
+- The Data User never handles raw WebAuthn credential material — they only deal with redirect URLs and confirmation tokens
 
 ## GDPR Erasure
 

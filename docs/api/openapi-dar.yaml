@@ -272,14 +272,16 @@ paths:
           initiated the registration.
         - `principal-verification` — identity verification evidence (method, outcome,
           reference). Strongly recommended; null if no structured verification was performed.
-        - `email` — customer email address, stored as a one-way hash for future
-          magic-link re-identification and lookup. Optional but required if magic-link
-          re-identification is to be used.
-        - `initiate-passkey-registration` — if `true`, the response includes
-          `passkey-registration-options` (a WebAuthn challenge and rp-id) for the
-          client to present to the browser. The resulting credential must be submitted
-          to `POST /identity-records/{ir}/credentials` to complete registration and
-          store the public key on the record.
+        - `email` — stored as a one-way hash for future magic-link re-identification
+          and lookup. Optional but required if magic-link re-identification is to be used.
+        - `initiate-passkey-registration` — if `true`, the response includes a
+          `passkey-registration-redirect` containing a short-lived URL to
+          `id.central.consent`. Redirect the customer to this URL — the register
+          completes the WebAuthn ceremony on its own origin, stores the public key,
+          and redirects back with `?dar-passkey-token={token-ref}`. Call
+          `GET /identity-records/{ir}/re-identify/{token-ref}` once to confirm.
+          Supply `passkey-return-url` to control where the customer lands after
+          the ceremony.
 
         Identity Records are scoped to the authenticated Data User and are never
         exposed to the unauthenticated `GET /access-records/{ak}` endpoint used by
@@ -340,9 +342,11 @@ paths:
         "201":
           description: |
             Identity record created successfully. If `initiate-passkey-registration`
-            was `true`, `passkey-registration-options` is populated — pass these to
-            `navigator.credentials.create()` and submit the result to
-            `POST /identity-records/{ir}/credentials`.
+            was `true`, `passkey-registration-redirect` is populated — redirect the
+            customer to `redirect-url`. The register completes the WebAuthn ceremony
+            on `id.central.consent` and sends the customer back to `return-url` with
+            `?dar-passkey-token={token-ref}`. Call
+            `GET /identity-records/{ir}/re-identify/{token-ref}` once to confirm.
           headers:
             Location:
               description: URL of the newly created identity record.
@@ -354,7 +358,7 @@ paths:
               schema:
                 $ref: "#/components/schemas/CreateIdentityRecordResponse"
               examples:
-                with-passkey-options:
+                with-passkey-redirect:
                   summary: Response when passkey registration was initiated
                   value:
                     response:
@@ -362,14 +366,11 @@ paths:
                       timestamp: "2024-01-15T09:30:00Z"
                       transaction-id: tid_691df0c788ca043403b7fa90
                     ir: ir_a3c5e7f9b1d3a3c5e7f9b1d3
-                    passkey-registration-options:
-                      challenge: "Y2hhbGxlbmdlX2V4YW1wbGVfYmFzZTY0dXJs"
-                      rp-id: "central.consent"
-                      rp-name: "Data Access Register"
-                      user-id: "aXJfYTNjNWU3ZjliMWQz"
-                      user-name: "customer@example.com"
-                      timeout: 60000
-                without-passkey-options:
+                    passkey-registration-redirect:
+                      redirect-url: "https://id.central.consent/passkey/register?session=pks_a1b2c3d4e5f6a1b2c3d4e5f6"
+                      token-ref: "mlr_9f8e7d6c5b4a9f8e7d6c5b4a"
+                      expires-at: "2024-01-15T09:35:00Z"
+                without-passkey-redirect:
                   summary: Response when no passkey registration requested
                   value:
                     response:
@@ -377,7 +378,7 @@ paths:
                       timestamp: "2024-01-15T09:30:00Z"
                       transaction-id: tid_691df0c788ca043403b7fa90
                     ir: ir_a3c5e7f9b1d3a3c5e7f9b1d3
-                    passkey-registration-options: null
+                    passkey-registration-redirect: null
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
@@ -483,82 +484,6 @@ paths:
         "500":
           $ref: "#/components/responses/InternalServerError"
 
-  /identity-records/{ir}/credentials:
-    post:
-      operationId: registerPasskeyCredential
-      summary: Register a Passkey Credential
-      description: |
-        Completes a WebAuthn passkey registration ceremony by submitting the signed
-        credential response from the browser back to the register. The register
-        verifies the response against the pending challenge and stores the public
-        key on the Identity Record.
-
-        **Flow:**
-        1. A passkey registration challenge is issued either at Identity Record
-           creation (`initiate-passkey-registration: true` on `POST /identity-records`)
-           or on demand via `POST /identity-records/{ir}/re-identify` with
-           `method: passkey-register`.
-        2. The Data User passes the `passkey-registration-options` to
-           `navigator.credentials.create()` in the browser.
-        3. The browser returns a `PublicKeyCredential`. The Data User submits its
-           serialised response body to this endpoint.
-        4. On success, the credential is stored and a `credential-id` is returned
-           for future reference.
-
-        Challenges expire after 5 minutes. Submitting an expired or already-used
-        challenge returns `400`.
-      tags:
-        - Identity Records
-      security:
-        - bearerAuth: []
-      parameters:
-        - name: ir
-          in: path
-          required: true
-          schema:
-            $ref: "#/components/schemas/IdentityRecordKey"
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: "#/components/schemas/RegisterCredentialRequest"
-            example:
-              client-data-json: "eyJ0eXBlIjoid2ViYXV0aG4uY3JlYXRlIiwiY2hhbGxlbmdlIjoiWTJoaGJHeGxibWRsWDJWNFlXMXdiR1ZmWW1GelpUWTBkWEpzIiwib3JpZ2luIjoiaHR0cHM6Ly9jZW50cmFsLmNvbnNlbnQifQ"
-              attestation-object: "o2NmbXRkbm9uZWdhdHRTdG10oGhhdXRoRGF0YVik..."
-              transports:
-                - internal
-      responses:
-        "201":
-          description: Passkey credential registered and stored on the Identity Record.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/RegisterCredentialResponse"
-              example:
-                response:
-                  resource: /v1/identity-records/ir_a3c5e7f9b1d3a3c5e7f9b1d3/credentials
-                  timestamp: "2024-01-15T09:35:00Z"
-                  transaction-id: tid_9f8e7d6c5b4a9f8e7d6c5b4a
-                credential-id: cred_1a2b3c4d5e6f1a2b3c4d5e6f
-                registered-at: "2024-01-15T09:35:00Z"
-        "400":
-          description: >
-            Challenge expired, already used, or credential response failed
-            verification.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrorResponse"
-        "401":
-          $ref: "#/components/responses/Unauthorised"
-        "403":
-          $ref: "#/components/responses/Forbidden"
-        "404":
-          $ref: "#/components/responses/NotFound"
-        "500":
-          $ref: "#/components/responses/InternalServerError"
-
   /identity-records/{ir}/credentials/{credentialId}:
     delete:
       operationId: removePasskeyCredential
@@ -611,9 +536,16 @@ paths:
 
         **`magic-link`** — requires `email` to be stored on the Identity Record.
         The register dispatches a short-lived signed URL to the stored email address.
-        The link expires after 15 minutes and is single-use. On redemption the
-        register marks the re-identification as confirmed. The Data User polls
-        `GET /identity-records/{ir}/re-identify/{token-ref}` to confirm completion.
+        The link expires after 15 minutes and is single-use.
+
+        Supply an optional `redirect-url` (pre-registered for the Data User's DUID)
+        to send the customer back to the Data User's application after clicking —
+        the register appends `?dar-reid-token={token-ref}` so the application can
+        confirm re-identification with a single call rather than polling.
+
+        Without `redirect-url`, the customer lands on a confirmation page at
+        `central.consent` and the Data User polls
+        `GET /identity-records/{ir}/re-identify/{token-ref}` for confirmation.
 
         **`passkey-assert`** — requires at least one credential registered on the
         Identity Record. The register returns a WebAuthn assertion challenge. The
@@ -647,81 +579,66 @@ paths:
             schema:
               $ref: "#/components/schemas/ReIdentifyRequest"
             examples:
-              magic-link:
-                summary: Initiate magic-link dispatch
+              magic-link-with-redirect:
+                summary: Magic-link with redirect back to Data User app
+                value:
+                  method: magic-link
+                  redirect-url: "https://app.bright-energy.com/renew/confirmed"
+              magic-link-portal:
+                summary: Magic-link without redirect (customer lands on central.consent)
                 value:
                   method: magic-link
               passkey-assert:
                 summary: Initiate passkey assertion (existing credential)
                 value:
                   method: passkey-assert
+                  passkey-return-url: "https://app.bright-energy.com/renew/confirmed"
               passkey-register:
                 summary: Initiate passkey registration (new device)
                 value:
                   method: passkey-register
-              passkey-assert-complete:
-                summary: Complete passkey assertion — submit signed credential response
-                value:
-                  method: passkey-assert-complete
-                  assertion-response:
-                    credential-id: "AQIDBAUGBwgJCgsMDQ4PEA"
-                    client-data-json: "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0IiwiY2hhbGxlbmdlIjoiWTJoaGJHeGxibWRsWDJWNFlXMXdiR1ZmWW1GelpUWTBkWEpzIn0"
-                    authenticator-data: "SZYN5YgOjGh0NBcPZHZgW4_krrmihjLHmVzzuoMdl2MFAAAAAA"
-                    signature: "MEUCIQDKypPONFnLSLpRJ_..."
+                  passkey-return-url: "https://app.bright-energy.com/onboard/passkey-done"
       responses:
         "200":
           description: |
-            Re-identification flow initiated or completed.
+            Re-identification flow initiated.
 
             - For `magic-link`: link dispatched, `magic-link` object populated.
-            - For `passkey-assert` or `passkey-register`: challenge issued, `passkey` object populated.
-            - For `passkey-assert-complete`: assertion verified, `verified: true` returned.
+            - For `passkey-assert` or `passkey-register`: `passkey` redirect object
+              populated — redirect the customer to `passkey.redirect-url` immediately.
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/ReIdentifyResponse"
               examples:
                 magic-link-dispatched:
-                  summary: Magic link dispatched
+                  summary: Magic link dispatched (with redirect-url)
                   value:
                     response:
                       resource: /v1/identity-records/ir_a3c5e7f9b1d3a3c5e7f9b1d3/re-identify
                       timestamp: "2026-03-24T09:00:00Z"
                       transaction-id: tid_abc123def456abc123def456
                     method: magic-link
-                    verified: false
                     magic-link:
                       dispatched-to: "c*****r@example.com"
                       expires-at: "2026-03-24T09:15:00Z"
                       token-ref: mlr_9f8e7d6c5b4a9f8e7d6c5b4a
+                      redirect-url: "https://app.bright-energy.com/renew/confirmed"
                     passkey: null
-                passkey-assert-challenge:
-                  summary: Passkey assertion challenge issued
+                passkey-assert-redirect:
+                  summary: Passkey assertion — redirect to id.central.consent
                   value:
                     response:
                       resource: /v1/identity-records/ir_a3c5e7f9b1d3a3c5e7f9b1d3/re-identify
                       timestamp: "2026-03-24T09:00:00Z"
                       transaction-id: tid_abc123def456abc123def456
                     method: passkey-assert
-                    verified: false
                     magic-link: null
                     passkey:
-                      challenge: "Y2hhbGxlbmdlX2V4YW1wbGVfYmFzZTY0dXJs"
-                      rp-id: "central.consent"
-                      timeout: 60000
-                      allowed-credentials:
-                        - cred_1a2b3c4d5e6f1a2b3c4d5e6f
-                passkey-assert-verified:
-                  summary: Passkey assertion verified
-                  value:
-                    response:
-                      resource: /v1/identity-records/ir_a3c5e7f9b1d3a3c5e7f9b1d3/re-identify
-                      timestamp: "2026-03-24T09:01:00Z"
-                      transaction-id: tid_def456abc123def456abc123
-                    method: passkey-assert-complete
-                    verified: true
-                    magic-link: null
-                    passkey: null
+                      redirect-url: "https://id.central.consent/passkey/assert?session=pks_a1b2c3d4e5f6a1b2c3d4e5f6"
+                      token-ref: mlr_1a2b3c4d5e6f1a2b3c4d5e6f
+                      expires-at: "2026-03-24T09:05:00Z"
+                      return-url: "https://app.bright-energy.com/renew/confirmed"
         "400":
           description: >
             Invalid method, missing required fields, challenge expired or already
@@ -759,14 +676,21 @@ paths:
   /identity-records/{ir}/re-identify/{tokenRef}:
     get:
       operationId: pollReIdentifyStatus
-      summary: Poll Magic-Link Re-identification Status
+      summary: Confirm Re-identification Status
       description: |
-        Polls the status of a magic-link re-identification flow. The `token-ref`
-        is returned when `POST /identity-records/{ir}/re-identify` is called with
-        `method: magic-link`.
+        Confirms the status of a magic-link or passkey re-identification flow.
+        The `token-ref` is returned in the `magic-link` or `passkey` object from
+        `POST /identity-records/{ir}/re-identify`, and also appended as a query
+        parameter when the register redirects the customer back to the Data User's
+        application.
 
-        Poll this endpoint until `status` is `confirmed` (customer clicked the
-        link) or `expired` (15-minute window elapsed without redemption).
+        **With a `redirect-url` or `passkey-return-url`** — the register appends
+        `?dar-reid-token={token-ref}` (magic link) or `?dar-passkey-token={token-ref}`
+        (passkey) to the return URL. Read the token from the query string and call
+        this endpoint **once** — no polling required.
+
+        **Without a return URL** — poll this endpoint until `status` is `confirmed`
+        or `expired`.
 
         **Suggested polling interval:** every 3–5 seconds. Stop polling on
         `confirmed`, `expired`, or after 20 minutes.
@@ -2211,27 +2135,28 @@ components:
     ReIdentifyMethod:
       type: string
       description: |
-        The re-identification method to use or the step in a multi-step flow.
+        The re-identification method to use.
 
-        **Single-step:**
-        - `magic-link` — dispatch a signed link to the stored email address.
-          Poll `GET /identity-records/{ir}/re-identify/{token-ref}` for completion.
+        **`magic-link`** — single-step. The register dispatches a signed link to
+        the stored email address. Optionally supply `redirect-url` to send the
+        customer back to the Data User's app after clicking; otherwise the customer
+        lands on `central.consent`. Poll or check
+        `GET /identity-records/{ir}/re-identify/{token-ref}` to confirm.
 
-        **Two-step passkey assertion (existing credential):**
-        - `passkey-assert` — initiate: returns a WebAuthn assertion challenge.
-          Pass to `navigator.credentials.get()`.
-        - `passkey-assert-complete` — complete: submit the signed assertion
-          response. Returns `verified: true` on success.
+        **`passkey-assert`** — two-step redirect. The response contains a
+        `passkey-redirect` with a short-lived URL to `id.central.consent`. Redirect
+        the customer there; the register runs the WebAuthn assertion against the
+        stored public key on its own origin, then redirects back with
+        `?dar-passkey-token={token-ref}`. Call
+        `GET /identity-records/{ir}/re-identify/{token-ref}` once to confirm.
 
-        **Two-step passkey registration (new device):**
-        - `passkey-register` — initiate: returns a WebAuthn registration challenge.
-          Pass to `navigator.credentials.create()`, then submit to
-          `POST /identity-records/{ir}/credentials` to store the public key.
-          Re-identification is confirmed on successful credential registration.
+        **`passkey-register`** — two-step redirect for new device enrolment. Same
+        flow as `passkey-assert` but runs a registration ceremony instead of
+        assertion. Stores a new public key credential on the Identity Record and
+        confirms re-identification on success.
       enum:
         - magic-link
         - passkey-assert
-        - passkey-assert-complete
         - passkey-register
 
     ReIdentifyRequest:
@@ -2241,89 +2166,89 @@ components:
       properties:
         method:
           $ref: "#/components/schemas/ReIdentifyMethod"
-        assertion-response:
-          type: object
+        redirect-url:
+          type: string
+          format: uri
           nullable: true
           description: >
-            Required when `method` is `passkey-assert-complete`. The serialised
-            `AuthenticatorAssertionResponse` from `navigator.credentials.get()`.
-          properties:
-            credential-id:
-              type: string
-              description: Base64url-encoded credential ID from the browser response.
-              example: "AQIDBAUGBwgJCgsMDQ4PEA"
-            client-data-json:
-              type: string
-              description: Base64url-encoded `clientDataJSON` from the authenticator response.
-              example: "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0IiwiY2hhbGxlbmdlIjoiWTJoaGJHeGxibWRsWDJWNFlXMXdiR1ZmWW1GelpUWTBkWEpzIn0"
-            authenticator-data:
-              type: string
-              description: Base64url-encoded `authenticatorData` from the authenticator response.
-              example: "SZYN5YgOjGh0NBcPZHZgW4_krrmihjLHmVzzuoMdl2MFAAAAAA"
-            signature:
-              type: string
-              description: Base64url-encoded `signature` from the authenticator response.
-              example: "MEUCIQDKypPONFnLSLpRJ_..."
-          required:
-            - credential-id
-            - client-data-json
-            - authenticator-data
-            - signature
+            Optional. Only valid when `method` is `magic-link`. A URL to redirect
+            the customer to after they click the magic link and the register has
+            confirmed their identity. Must exactly match a URL pre-registered for
+            the Data User's DUID.
+
+            When supplied, the register appends `?dar-reid-token={token-ref}` to
+            the URL before redirecting. The Data User reads `dar-reid-token` from
+            the query string and calls
+            `GET /identity-records/{ir}/re-identify/{token-ref}` once to confirm
+            `status: confirmed` — no polling required.
+
+            When omitted, the customer lands on a confirmation page at
+            `central.consent` after clicking the link. The Data User must poll
+            `GET /identity-records/{ir}/re-identify/{token-ref}` to detect
+            confirmation.
+          example: "https://app.bright-energy.com/renew/confirmed"
+        passkey-return-url:
+          type: string
+          format: uri
+          nullable: true
+          description: >
+            Optional. Only valid when `method` is `passkey-assert` or
+            `passkey-register`. The URL the register redirects the customer back to
+            after the WebAuthn ceremony completes on `id.central.consent`. Must
+            exactly match a URL pre-registered for the Data User's DUID. The
+            register appends `?dar-passkey-token={token-ref}` on success.
+
+            When omitted, the customer lands on a completion page at
+            `id.central.consent`.
+          example: "https://app.bright-energy.com/renew/confirmed"
       required:
         - method
 
-    PasskeyOptions:
+    PasskeyRedirect:
       type: object
       description: >
-        WebAuthn options to pass to `navigator.credentials.create()` (registration)
-        or `navigator.credentials.get()` (assertion). Present when the method
-        initiates a passkey ceremony; null otherwise.
+        A short-lived redirect to `id.central.consent` where the register completes
+        the WebAuthn ceremony on its own origin. Present when a passkey method was
+        initiated; null otherwise. Redirect the customer to `redirect-url`
+        immediately — the session expires in 5 minutes.
+
+        On completion, the register redirects the customer back to `return-url`
+        (if supplied) with `?dar-passkey-token={token-ref}` appended. Call
+        `GET /identity-records/{ir}/re-identify/{token-ref}` once to confirm.
       properties:
-        challenge:
+        redirect-url:
           type: string
-          description: Base64url-encoded WebAuthn challenge. Single-use; expires after 5 minutes.
-          example: "Y2hhbGxlbmdlX2V4YW1wbGVfYmFzZTY0dXJs"
-        rp-id:
-          type: string
-          description: Relying Party identifier.
-          example: "central.consent"
-        timeout:
-          type: integer
-          description: Suggested client-side timeout in milliseconds.
-          example: 60000
-        rp-name:
-          type: string
-          description: Human-readable Relying Party name. Present for registration challenges only.
-          example: "Data Access Register"
-          nullable: true
-        user-id:
-          type: string
+          format: uri
           description: >
-            Base64url-encoded opaque user handle for WebAuthn registration. Present
-            for registration challenges only. Not a PII identifier.
-          example: "aXJfYTNjNWU3ZjliMWQz"
-          nullable: true
-        user-name:
+            Short-lived URL to `id.central.consent` that initiates the WebAuthn
+            ceremony. Valid for 5 minutes; single-use.
+          example: "https://id.central.consent/passkey/assert?session=pks_a1b2c3d4e5f6a1b2c3d4e5f6"
+        token-ref:
           type: string
+          pattern: "^mlr_[0-9a-f]{24}$"
           description: >
-            Display name shown by the authenticator during registration. Typically
-            the customer's email address. Present for registration challenges only.
-          example: "customer@example.com"
+            Opaque reference to confirm completion. The register appends
+            `?dar-passkey-token={token-ref}` to the `return-url` after the ceremony.
+            Call `GET /identity-records/{ir}/re-identify/{token-ref}` once to verify
+            `status: confirmed`.
+          example: "mlr_1a2b3c4d5e6f1a2b3c4d5e6f"
+        expires-at:
+          type: string
+          format: date-time
+          description: UTC timestamp when the redirect URL expires.
+          example: "2026-03-24T09:05:00Z"
+        return-url:
+          type: string
+          format: uri
           nullable: true
-        allowed-credentials:
-          type: array
           description: >
-            Credential IDs the authenticator may use for assertion. Present for
-            assertion challenges only. Null for registration challenges.
-          nullable: true
-          items:
-            $ref: "#/components/schemas/CredentialId"
-          example:
-            - cred_1a2b3c4d5e6f1a2b3c4d5e6f
+            The registered return URL supplied in the request, if any. Echoed back
+            for confirmation. Null when no `passkey-return-url` was supplied.
+          example: "https://app.bright-energy.com/renew/confirmed"
       required:
-        - challenge
-        - rp-id
-        - timeout
+        - redirect-url
+        - token-ref
+        - expires-at
 
     MagicLinkDetails:
       type: object
@@ -2345,9 +2270,20 @@ components:
           type: string
           pattern: "^mlr_[0-9a-f]{24}$"
           description: >
-            Opaque reference used to poll `GET /identity-records/{ir}/re-identify/{token-ref}`
-            for confirmation of link redemption.
+            Opaque reference used to confirm re-identification. When a `redirect-url`
+            was supplied, the register appends `?dar-reid-token={token-ref}` to it
+            after the customer clicks the link — read this from the query string
+            and call `GET /identity-records/{ir}/re-identify/{token-ref}` once.
+            When no `redirect-url` was supplied, poll that endpoint until confirmed.
           example: "mlr_9f8e7d6c5b4a9f8e7d6c5b4a"
+        redirect-url:
+          type: string
+          format: uri
+          nullable: true
+          description: >
+            The registered redirect URL supplied in the request, if any. Echoed back
+            for confirmation. Null when no `redirect-url` was supplied.
+          example: "https://app.bright-energy.com/renew/confirmed"
       required:
         - dispatched-to
         - expires-at
@@ -2360,13 +2296,6 @@ components:
           $ref: "#/components/schemas/ResponseMetadata"
         method:
           $ref: "#/components/schemas/ReIdentifyMethod"
-        verified:
-          type: boolean
-          description: >
-            `true` when re-identification is confirmed in this response (i.e.
-            `passkey-assert-complete` succeeded). `false` for all initiation steps
-            where confirmation is pending.
-          example: false
         magic-link:
           nullable: true
           description: Populated for `magic-link` method; null otherwise.
@@ -2375,27 +2304,34 @@ components:
         passkey:
           nullable: true
           description: >
-            Populated for `passkey-assert` and `passkey-register` initiation steps;
-            null for `magic-link` and `passkey-assert-complete`.
+            Populated for `passkey-assert` and `passkey-register` methods; null
+            for `magic-link`. Contains the redirect URL to `id.central.consent`
+            where the WebAuthn ceremony takes place.
           allOf:
-            - $ref: "#/components/schemas/PasskeyOptions"
+            - $ref: "#/components/schemas/PasskeyRedirect"
       required:
         - response
         - method
-        - verified
 
     ReIdentifyStatusResponse:
       type: object
-      description: Status of a pending magic-link re-identification flow.
+      description: >
+        Status of a pending magic-link or passkey re-identification flow.
+        Returned by `GET /identity-records/{ir}/re-identify/{token-ref}`.
       properties:
         response:
           $ref: "#/components/schemas/ResponseMetadata"
+        method:
+          $ref: "#/components/schemas/ReIdentifyMethod"
+          description: The re-identification method that generated this token.
         status:
           type: string
           description: |
-            - `pending` — link dispatched, awaiting customer redemption.
-            - `confirmed` — customer redeemed the link; re-identification complete.
-            - `expired` — 15-minute window elapsed without redemption.
+            - `pending` — awaiting customer action (link not yet clicked, or passkey
+              ceremony not yet completed).
+            - `confirmed` — re-identification complete.
+            - `expired` — window elapsed without completion (15 minutes for magic
+              link; 5 minutes for passkey redirect).
           enum:
             - pending
             - confirmed
@@ -2404,10 +2340,11 @@ components:
           type: string
           format: date-time
           nullable: true
-          description: UTC timestamp of redemption. Null until `status` is `confirmed`.
+          description: UTC timestamp of confirmation. Null until `status` is `confirmed`.
           example: "2026-03-24T09:07:28Z"
       required:
         - response
+        - method
         - status
         - confirmed-at
 
@@ -2415,7 +2352,7 @@ components:
       type: object
       description: >
         Request body for `POST /identity-records`. Extends the core `IdentityRecord`
-        fields with `email` and `initiate-passkey-registration`.
+        fields with `email`, `initiate-passkey-registration`, and `passkey-return-url`.
       properties:
         pii-principal:
           $ref: "#/components/schemas/PIIPrincipal"
@@ -2445,11 +2382,21 @@ components:
           type: boolean
           default: false
           description: >
-            If `true`, the register generates a WebAuthn registration challenge and
-            returns it in `passkey-registration-options`. The Data User must pass
-            these options to `navigator.credentials.create()` and submit the
-            resulting credential to `POST /identity-records/{ir}/credentials` to
-            complete registration.
+            If `true`, the register generates a passkey registration session and
+            returns a `passkey-registration-redirect`. Redirect the customer to the
+            supplied URL; the register completes the WebAuthn ceremony on
+            `id.central.consent` and redirects back to `passkey-return-url` with
+            `?dar-passkey-token={token-ref}` on success.
+        passkey-return-url:
+          type: string
+          format: uri
+          nullable: true
+          description: >
+            Required when `initiate-passkey-registration` is `true`. The URL the
+            register redirects the customer to after the passkey ceremony completes.
+            Must exactly match a URL pre-registered for the Data User's DUID.
+            Ignored if `initiate-passkey-registration` is false or omitted.
+          example: "https://app.bright-energy.com/onboard/passkey-done"
       required:
         - pii-principal
         - expressed-by
@@ -2461,14 +2408,17 @@ components:
           $ref: "#/components/schemas/ResponseMetadata"
         ir:
           $ref: "#/components/schemas/IdentityRecordKey"
-        passkey-registration-options:
+        passkey-registration-redirect:
           nullable: true
           description: >
-            Populated when `initiate-passkey-registration` was `true`. Pass to
-            `navigator.credentials.create()` in the browser, then submit the result
-            to `POST /identity-records/{ir}/credentials`. Null otherwise.
+            Populated when `initiate-passkey-registration` was `true`. Redirect
+            the customer to `redirect-url` — the register runs the WebAuthn
+            registration ceremony on `id.central.consent` and returns them to
+            `return-url` with `?dar-passkey-token={token-ref}`. Call
+            `GET /identity-records/{ir}/re-identify/{token-ref}` once to confirm.
+            Null otherwise.
           allOf:
-            - $ref: "#/components/schemas/PasskeyOptions"
+            - $ref: "#/components/schemas/PasskeyRedirect"
       required:
         - response
         - ir
@@ -2577,51 +2527,6 @@ components:
       required:
         - response
         - identity-record
-
-    RegisterCredentialRequest:
-      type: object
-      description: >
-        Serialised `AuthenticatorAttestationResponse` from `navigator.credentials.create()`.
-        Submit to `POST /identity-records/{ir}/credentials` to complete a passkey
-        registration ceremony.
-      properties:
-        client-data-json:
-          type: string
-          description: Base64url-encoded `clientDataJSON` from the attestation response.
-          example: "eyJ0eXBlIjoid2ViYXV0aG4uY3JlYXRlIiwiY2hhbGxlbmdlIjoiWTJoaGJHeGxibWRsWDJWNFlXMXdiR1ZmWW1GelpUWTBkWEpzIiwib3JpZ2luIjoiaHR0cHM6Ly9jZW50cmFsLmNvbnNlbnQifQ"
-        attestation-object:
-          type: string
-          description: Base64url-encoded `attestationObject` from the attestation response.
-          example: "o2NmbXRkbm9uZWdhdHRTdG10oGhhdXRoRGF0YVik..."
-        transports:
-          type: array
-          description: >
-            Authenticator transport hints reported by the browser. Stored as metadata;
-            used to populate `allowed-credentials` in future assertion challenges.
-          items:
-            type: string
-          example:
-            - internal
-      required:
-        - client-data-json
-        - attestation-object
-
-    RegisterCredentialResponse:
-      type: object
-      properties:
-        response:
-          $ref: "#/components/schemas/ResponseMetadata"
-        credential-id:
-          $ref: "#/components/schemas/CredentialId"
-        registered-at:
-          type: string
-          format: date-time
-          description: UTC timestamp when the credential was stored.
-          example: "2024-01-15T09:35:00Z"
-      required:
-        - response
-        - credential-id
-        - registered-at
 
     # -------------------------------------------------------------------------
     # ISO 27560 Section 2: Notice Fields
