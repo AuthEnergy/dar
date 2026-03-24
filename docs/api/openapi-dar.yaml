@@ -40,7 +40,7 @@ info:
     aligned to ISO/IEC TS 27560:2023:
 
     1. **`record-metadata`** — record identifier, creation timestamp, Controller
-       identity, PII Principal identity. Present for all records.
+       identity, and a reference to the associated Identity Record. Present for all records.
     2. **`notice`** — the privacy notice presented to the customer. Present only for
        consent-based records; null for all other legal bases.
     3. **`processing`** — legal basis, purpose, data types, and related obligations.
@@ -51,6 +51,23 @@ info:
     The `notice` and `access-event.consent` sub-object are null for non-consent records.
     The `access-event.consent` sub-object is null for non-consent records and populated
     for consent records.
+
+    ## Identity Records
+
+    The person-property relationship — who the individual is and their occupancy of the
+    meter point — is held separately in an **Identity Record** (`/identity-records`).
+    This keeps PII (MPxN, address, move-in date) and identity verification evidence
+    out of the access record entirely.
+
+    Each `AccessRecord` carries an `identity-record-ref` (`ir` key) linking it to its
+    Identity Record. Identity Records are accessible only to authenticated Data Users.
+    The unauthenticated `GET /access-records/{ak}` endpoint used by Data Providers
+    never returns PII.
+
+    Identity Records support two re-identification flows to reconnect a returning
+    customer to an existing record without re-collecting all their details:
+    - **Magic link** — a short-lived email link triggers re-identification.
+    - **Passkey** — initiates a WebAuthn registration or assertion ceremony.
 
     ## Legal Basis and Required Fields
 
@@ -97,7 +114,7 @@ info:
 
     URI-based versioning. Current version: `v1`.
 
-  version: "0.0.11"
+  version: "0.0.12"
   contact:
     name: Auth Energy
     email: contact@auth.energy
@@ -110,6 +127,12 @@ servers:
     description: Production
 
 tags:
+  - name: Identity Records
+    description: >
+      Endpoints for Data Users to create and manage Identity Records, which hold
+      the person-property relationship (MPxN, address, move-in date, identity
+      verification evidence) separately from access records. Supports re-identification
+      of returning customers via email magic link or WebAuthn passkey.
   - name: Authentication
     description: Obtain bearer tokens for authenticated endpoints.
   - name: Data Users
@@ -148,6 +171,651 @@ tags:
       recorded against an MPxN with active access records.
 
 paths:
+
+  # ---------------------------------------------------------------------------
+  # Identity Records — person-property relationship and re-identification
+  # ---------------------------------------------------------------------------
+
+  /identity-records:
+    get:
+      operationId: lookupIdentityRecords
+      summary: Look Up Identity Records
+      description: |
+        Returns Identity Records matching the supplied lookup parameters. Used by
+        a Data User to locate an existing record for a returning customer before
+        initiating re-identification.
+
+        At least one of `mpxn` or `email` must be supplied. Supplying both narrows
+        results to records where both values match.
+
+        Results are scoped to the authenticated Data User — a Data User cannot
+        look up records created by another Data User.
+
+        **Note on email lookup:** The register stores a one-way hash of the email
+        address for lookup purposes. The plaintext email is never returned in
+        responses. A match confirms a record exists for that address; the Data User
+        should already hold the email in their own system.
+      tags:
+        - Identity Records
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: mpxn
+          in: query
+          required: false
+          description: Filter by meter point identifier.
+          schema:
+            $ref: "#/components/schemas/MPxN"
+        - name: email
+          in: query
+          required: false
+          description: >
+            Filter by customer email address. Matched against a stored hash —
+            the plaintext is not retained in results.
+          schema:
+            type: string
+            format: email
+      responses:
+        "200":
+          description: Matching identity records returned.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LookupIdentityRecordsResponse"
+              example:
+                response:
+                  resource: /v1/identity-records?mpxn=1234567890123
+                  timestamp: "2026-03-24T09:00:00Z"
+                  transaction-id: tid_abc123def456abc123def456
+                identity-records:
+                  - ir: ir_a3c5e7f9b1d3a3c5e7f9b1d3
+                    created-at: "2024-01-15T09:30:00Z"
+                    pii-principal:
+                      mpxn: "1234567890123"
+                      move-in-date: "2022-06-30"
+                    expressed-by: data-subject
+                    has-email: true
+                    credentials:
+                      - credential-id: cred_1a2b3c4d5e6f1a2b3c4d5e6f
+                        registered-at: "2024-01-15T09:35:00Z"
+        "400":
+          description: Neither `mpxn` nor `email` was supplied.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorised"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
+    post:
+      operationId: createIdentityRecord
+      summary: Create an Identity Record
+      description: |
+        Creates an Identity Record holding the person-property relationship for a
+        consent or access registration. Returns an `ir` key that must be supplied
+        as `record-metadata.identity-record-ref` when creating the linked AccessRecord.
+
+        The Identity Record holds:
+        - `pii-principal` — MPxN, move-in date, and optionally address.
+        - `expressed-by` — whether the data subject or an authorised representative
+          initiated the registration.
+        - `principal-verification` — identity verification evidence (method, outcome,
+          reference). Strongly recommended; null if no structured verification was performed.
+        - `email` — customer email address, stored as a one-way hash for future
+          magic-link re-identification and lookup. Optional but required if magic-link
+          re-identification is to be used.
+        - `initiate-passkey-registration` — if `true`, the response includes
+          `passkey-registration-options` (a WebAuthn challenge and rp-id) for the
+          client to present to the browser. The resulting credential must be submitted
+          to `POST /identity-records/{ir}/credentials` to complete registration and
+          store the public key on the record.
+
+        Identity Records are scoped to the authenticated Data User and are never
+        exposed to the unauthenticated `GET /access-records/{ak}` endpoint used by
+        Data Providers.
+      tags:
+        - Identity Records
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateIdentityRecordRequest"
+            examples:
+              with-email-and-passkey:
+                summary: With email and passkey registration initiated
+                value:
+                  pii-principal:
+                    mpxn: "1234567890123"
+                    move-in-date: "2022-06-30"
+                    address:
+                      addressLine1: "221B Baker Street"
+                      townCity: "London"
+                      postcode: "NW1 6XE"
+                  expressed-by: data-subject
+                  email: "customer@example.com"
+                  initiate-passkey-registration: true
+                  principal-verification:
+                    method: "credit-card"
+                    verified-at: "2023-11-07T05:30:45Z"
+                    outcome: verified
+                    reference: "ch_3ABC123xyz"
+                    submitted: "XXXX-XXXX-XXXX-4242"
+                    verified-against: "Stripe customer record cus_ABC123"
+                    detail:
+                      last4: "4242"
+                      brand: "visa"
+                      stripe_customer: "cus_ABC123"
+              email-only:
+                summary: With email, no passkey
+                value:
+                  pii-principal:
+                    mpxn: "1234567890123"
+                    move-in-date: "2020-01-01"
+                  expressed-by: data-subject
+                  email: "customer@example.com"
+                  principal-verification: null
+              minimal:
+                summary: No re-identification credentials
+                value:
+                  pii-principal:
+                    mpxn: "1234567890123"
+                    move-in-date: "2020-01-01"
+                  expressed-by: data-subject
+                  principal-verification: null
+      responses:
+        "201":
+          description: |
+            Identity record created successfully. If `initiate-passkey-registration`
+            was `true`, `passkey-registration-options` is populated — pass these to
+            `navigator.credentials.create()` and submit the result to
+            `POST /identity-records/{ir}/credentials`.
+          headers:
+            Location:
+              description: URL of the newly created identity record.
+              schema:
+                type: string
+                example: "/v1/identity-records/ir_a3c5e7f9b1d3a3c5e7f9b1d3"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CreateIdentityRecordResponse"
+              examples:
+                with-passkey-options:
+                  summary: Response when passkey registration was initiated
+                  value:
+                    response:
+                      resource: /v1/identity-records/ir_a3c5e7f9b1d3a3c5e7f9b1d3
+                      timestamp: "2024-01-15T09:30:00Z"
+                      transaction-id: tid_691df0c788ca043403b7fa90
+                    ir: ir_a3c5e7f9b1d3a3c5e7f9b1d3
+                    passkey-registration-options:
+                      challenge: "Y2hhbGxlbmdlX2V4YW1wbGVfYmFzZTY0dXJs"
+                      rp-id: "central.consent"
+                      rp-name: "Data Access Register"
+                      user-id: "aXJfYTNjNWU3ZjliMWQz"
+                      user-name: "customer@example.com"
+                      timeout: 60000
+                without-passkey-options:
+                  summary: Response when no passkey registration requested
+                  value:
+                    response:
+                      resource: /v1/identity-records/ir_a3c5e7f9b1d3a3c5e7f9b1d3
+                      timestamp: "2024-01-15T09:30:00Z"
+                      transaction-id: tid_691df0c788ca043403b7fa90
+                    ir: ir_a3c5e7f9b1d3a3c5e7f9b1d3
+                    passkey-registration-options: null
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorised"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
+  /identity-records/{ir}:
+    get:
+      operationId: getIdentityRecord
+      summary: Retrieve an Identity Record
+      description: |
+        Returns the full Identity Record for a given `ir` key. Only accessible to
+        the authenticated Data User that created the record.
+
+        The `email` field is never returned in plaintext — `has-email` indicates
+        whether an email address is registered on the record. The `credentials`
+        array returns passkey metadata (credential ID, registered-at) but never
+        the public key material itself.
+      tags:
+        - Identity Records
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: ir
+          in: path
+          description: The identity record key issued at creation.
+          required: true
+          schema:
+            $ref: "#/components/schemas/IdentityRecordKey"
+      responses:
+        "200":
+          description: Identity record found and returned.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GetIdentityRecordResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorised"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
+    delete:
+      operationId: deleteIdentityRecord
+      summary: Anonymise an Identity Record
+      description: |
+        Anonymises an Identity Record in response to a GDPR Art. 17 erasure
+        request. The record is retained in a tombstoned state for audit continuity
+        — the `ir` key remains valid and the linked AccessRecord continues to
+        reference it — but all PII fields (`pii-principal`, `email`, `credentials`,
+        and `principal-verification`) are permanently destroyed.
+
+        **Pre-condition:** All AccessRecords linked to this Identity Record must be
+        in `REVOKED` or `EXPIRED` state. Attempting to anonymise an Identity Record
+        linked to an `ACTIVE` access record returns `409`.
+
+        This operation is irreversible.
+      tags:
+        - Identity Records
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: ir
+          in: path
+          description: The identity record key to anonymise.
+          required: true
+          schema:
+            $ref: "#/components/schemas/IdentityRecordKey"
+      responses:
+        "200":
+          description: Identity record anonymised. All PII permanently destroyed.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AnonymiseIdentityRecordResponse"
+              example:
+                response:
+                  resource: /v1/identity-records/ir_a3c5e7f9b1d3a3c5e7f9b1d3
+                  timestamp: "2026-03-24T10:00:00Z"
+                  transaction-id: tid_abc123def456abc123def456
+                ir: ir_a3c5e7f9b1d3a3c5e7f9b1d3
+                anonymised-at: "2026-03-24T10:00:00Z"
+        "401":
+          $ref: "#/components/responses/Unauthorised"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: >
+            One or more linked AccessRecords are still `ACTIVE`. Revoke or allow
+            all linked access records to expire before anonymising.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
+  /identity-records/{ir}/credentials:
+    post:
+      operationId: registerPasskeyCredential
+      summary: Register a Passkey Credential
+      description: |
+        Completes a WebAuthn passkey registration ceremony by submitting the signed
+        credential response from the browser back to the register. The register
+        verifies the response against the pending challenge and stores the public
+        key on the Identity Record.
+
+        **Flow:**
+        1. A passkey registration challenge is issued either at Identity Record
+           creation (`initiate-passkey-registration: true` on `POST /identity-records`)
+           or on demand via `POST /identity-records/{ir}/re-identify` with
+           `method: passkey-register`.
+        2. The Data User passes the `passkey-registration-options` to
+           `navigator.credentials.create()` in the browser.
+        3. The browser returns a `PublicKeyCredential`. The Data User submits its
+           serialised response body to this endpoint.
+        4. On success, the credential is stored and a `credential-id` is returned
+           for future reference.
+
+        Challenges expire after 5 minutes. Submitting an expired or already-used
+        challenge returns `400`.
+      tags:
+        - Identity Records
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: ir
+          in: path
+          required: true
+          schema:
+            $ref: "#/components/schemas/IdentityRecordKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RegisterCredentialRequest"
+            example:
+              client-data-json: "eyJ0eXBlIjoid2ViYXV0aG4uY3JlYXRlIiwiY2hhbGxlbmdlIjoiWTJoaGJHeGxibWRsWDJWNFlXMXdiR1ZmWW1GelpUWTBkWEpzIiwib3JpZ2luIjoiaHR0cHM6Ly9jZW50cmFsLmNvbnNlbnQifQ"
+              attestation-object: "o2NmbXRkbm9uZWdhdHRTdG10oGhhdXRoRGF0YVik..."
+              transports:
+                - internal
+      responses:
+        "201":
+          description: Passkey credential registered and stored on the Identity Record.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RegisterCredentialResponse"
+              example:
+                response:
+                  resource: /v1/identity-records/ir_a3c5e7f9b1d3a3c5e7f9b1d3/credentials
+                  timestamp: "2024-01-15T09:35:00Z"
+                  transaction-id: tid_9f8e7d6c5b4a9f8e7d6c5b4a
+                credential-id: cred_1a2b3c4d5e6f1a2b3c4d5e6f
+                registered-at: "2024-01-15T09:35:00Z"
+        "400":
+          description: >
+            Challenge expired, already used, or credential response failed
+            verification.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorised"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
+  /identity-records/{ir}/credentials/{credentialId}:
+    delete:
+      operationId: removePasskeyCredential
+      summary: Remove a Passkey Credential
+      description: |
+        Removes a registered passkey credential from an Identity Record. The
+        credential can no longer be used for passkey assertion after removal.
+
+        If no credentials remain on the record after removal, passkey-based
+        re-identification is no longer available for this Identity Record.
+        Magic-link re-identification remains available if an email address is
+        registered.
+      tags:
+        - Identity Records
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: ir
+          in: path
+          required: true
+          schema:
+            $ref: "#/components/schemas/IdentityRecordKey"
+        - name: credentialId
+          in: path
+          required: true
+          schema:
+            $ref: "#/components/schemas/CredentialId"
+      responses:
+        "204":
+          description: Credential removed. No response body.
+        "401":
+          $ref: "#/components/responses/Unauthorised"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
+  /identity-records/{ir}/re-identify:
+    post:
+      operationId: reIdentify
+      summary: Initiate Re-identification
+      description: |
+        Initiates or completes a re-identification flow for a returning customer,
+        reconnecting them to their existing Identity Record without re-collecting
+        all their details.
+
+        **Three methods are supported:**
+
+        **`magic-link`** — requires `email` to be stored on the Identity Record.
+        The register dispatches a short-lived signed URL to the stored email address.
+        The link expires after 15 minutes and is single-use. On redemption the
+        register marks the re-identification as confirmed. The Data User polls
+        `GET /identity-records/{ir}/re-identify/{token-ref}` to confirm completion.
+
+        **`passkey-assert`** — requires at least one credential registered on the
+        Identity Record. The register returns a WebAuthn assertion challenge. The
+        Data User passes this to `navigator.credentials.get()`, then submits the
+        signed assertion response back to this endpoint with `method: passkey-assert-complete`
+        to verify and confirm re-identification.
+
+        **`passkey-register`** — used when the customer has no existing passkey
+        on the record (e.g. new device). Returns a WebAuthn registration challenge.
+        The Data User completes the ceremony via `POST /identity-records/{ir}/credentials`
+        to store the new public key, then the re-identification is confirmed.
+
+        Re-identification does not modify the core Identity Record fields. It is a
+        verification step confirming the returning individual is the same principal
+        as originally recorded.
+      tags:
+        - Identity Records
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: ir
+          in: path
+          description: The identity record key for the returning principal.
+          required: true
+          schema:
+            $ref: "#/components/schemas/IdentityRecordKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ReIdentifyRequest"
+            examples:
+              magic-link:
+                summary: Initiate magic-link dispatch
+                value:
+                  method: magic-link
+              passkey-assert:
+                summary: Initiate passkey assertion (existing credential)
+                value:
+                  method: passkey-assert
+              passkey-register:
+                summary: Initiate passkey registration (new device)
+                value:
+                  method: passkey-register
+              passkey-assert-complete:
+                summary: Complete passkey assertion — submit signed credential response
+                value:
+                  method: passkey-assert-complete
+                  assertion-response:
+                    credential-id: "AQIDBAUGBwgJCgsMDQ4PEA"
+                    client-data-json: "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0IiwiY2hhbGxlbmdlIjoiWTJoaGJHeGxibWRsWDJWNFlXMXdiR1ZmWW1GelpUWTBkWEpzIn0"
+                    authenticator-data: "SZYN5YgOjGh0NBcPZHZgW4_krrmihjLHmVzzuoMdl2MFAAAAAA"
+                    signature: "MEUCIQDKypPONFnLSLpRJ_..."
+      responses:
+        "200":
+          description: |
+            Re-identification flow initiated or completed.
+
+            - For `magic-link`: link dispatched, `magic-link` object populated.
+            - For `passkey-assert` or `passkey-register`: challenge issued, `passkey` object populated.
+            - For `passkey-assert-complete`: assertion verified, `verified: true` returned.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReIdentifyResponse"
+              examples:
+                magic-link-dispatched:
+                  summary: Magic link dispatched
+                  value:
+                    response:
+                      resource: /v1/identity-records/ir_a3c5e7f9b1d3a3c5e7f9b1d3/re-identify
+                      timestamp: "2026-03-24T09:00:00Z"
+                      transaction-id: tid_abc123def456abc123def456
+                    method: magic-link
+                    verified: false
+                    magic-link:
+                      dispatched-to: "c*****r@example.com"
+                      expires-at: "2026-03-24T09:15:00Z"
+                      token-ref: mlr_9f8e7d6c5b4a9f8e7d6c5b4a
+                    passkey: null
+                passkey-assert-challenge:
+                  summary: Passkey assertion challenge issued
+                  value:
+                    response:
+                      resource: /v1/identity-records/ir_a3c5e7f9b1d3a3c5e7f9b1d3/re-identify
+                      timestamp: "2026-03-24T09:00:00Z"
+                      transaction-id: tid_abc123def456abc123def456
+                    method: passkey-assert
+                    verified: false
+                    magic-link: null
+                    passkey:
+                      challenge: "Y2hhbGxlbmdlX2V4YW1wbGVfYmFzZTY0dXJs"
+                      rp-id: "central.consent"
+                      timeout: 60000
+                      allowed-credentials:
+                        - cred_1a2b3c4d5e6f1a2b3c4d5e6f
+                passkey-assert-verified:
+                  summary: Passkey assertion verified
+                  value:
+                    response:
+                      resource: /v1/identity-records/ir_a3c5e7f9b1d3a3c5e7f9b1d3/re-identify
+                      timestamp: "2026-03-24T09:01:00Z"
+                      transaction-id: tid_def456abc123def456abc123
+                    method: passkey-assert-complete
+                    verified: true
+                    magic-link: null
+                    passkey: null
+        "400":
+          description: >
+            Invalid method, missing required fields, challenge expired or already
+            used, or assertion response failed verification.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorised"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: >
+            The Identity Record has been anonymised and cannot be used for
+            re-identification.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "422":
+          description: >
+            `magic-link` requested but no email address is stored on this
+            Identity Record. `passkey-assert` requested but no credentials
+            are registered.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
+  /identity-records/{ir}/re-identify/{tokenRef}:
+    get:
+      operationId: pollReIdentifyStatus
+      summary: Poll Magic-Link Re-identification Status
+      description: |
+        Polls the status of a magic-link re-identification flow. The `token-ref`
+        is returned when `POST /identity-records/{ir}/re-identify` is called with
+        `method: magic-link`.
+
+        Poll this endpoint until `status` is `confirmed` (customer clicked the
+        link) or `expired` (15-minute window elapsed without redemption).
+
+        **Suggested polling interval:** every 3–5 seconds. Stop polling on
+        `confirmed`, `expired`, or after 20 minutes.
+      tags:
+        - Identity Records
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: ir
+          in: path
+          required: true
+          schema:
+            $ref: "#/components/schemas/IdentityRecordKey"
+        - name: tokenRef
+          in: path
+          required: true
+          description: The `token-ref` returned by the magic-link initiation call.
+          schema:
+            type: string
+            pattern: "^mlr_[0-9a-f]{24}$"
+            example: "mlr_9f8e7d6c5b4a9f8e7d6c5b4a"
+      responses:
+        "200":
+          description: Status returned.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReIdentifyStatusResponse"
+              examples:
+                pending:
+                  summary: Awaiting customer redemption
+                  value:
+                    response:
+                      resource: /v1/identity-records/ir_a3c5e7f9b1d3a3c5e7f9b1d3/re-identify/mlr_9f8e7d6c5b4a9f8e7d6c5b4a
+                      timestamp: "2026-03-24T09:05:00Z"
+                      transaction-id: tid_aabbccddeeff001122334455
+                    status: pending
+                    confirmed-at: null
+                confirmed:
+                  summary: Customer redeemed the link
+                  value:
+                    response:
+                      resource: /v1/identity-records/ir_a3c5e7f9b1d3a3c5e7f9b1d3/re-identify/mlr_9f8e7d6c5b4a9f8e7d6c5b4a
+                      timestamp: "2026-03-24T09:07:30Z"
+                      transaction-id: tid_112233445566778899aabbcc
+                    status: confirmed
+                    confirmed-at: "2026-03-24T09:07:28Z"
+        "401":
+          $ref: "#/components/responses/Unauthorised"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
   /auth/token:
     get:
       operationId: getAuthToken
@@ -222,13 +890,7 @@ paths:
                         addressLine1: "10 Canary Wharf"
                         townCity: "London"
                         postcode: "E14 5AB"
-                    pii-principal:
-                      mpxn: "1234567890123"
-                      move-in-date: "2022-06-30"
-                      address:
-                        addressLine1: "221B Baker Street"
-                        townCity: "London"
-                        postcode: "NW1 6XE"
+                    identity-record-ref: "ir_a3c5e7f9b1d3a3c5e7f9b1d3"
                   notice:
                     terms-url: "https://bright-energy.com/privacy-v3.html"
                     notice-version: "v3.2"
@@ -248,18 +910,6 @@ paths:
                     consent:
                       consent-type: expressed-consent
                       method: "Explicit web checkbox"
-                      expressed-by: data-subject
-                      principal-verification:
-                        method: "credit-card"
-                        verified-at: "2023-11-07T05:30:45Z"
-                        outcome: verified
-                        reference: "ch_3ABC123xyz"
-                        submitted: "XXXX-XXXX-XXXX-4242"
-                        verified-against: "Stripe customer record cus_ABC123"
-                        detail:
-                          last4: "4242"
-                          brand: "visa"
-                          stripe_customer: "cus_ABC123"
               legitimate-interests:
                 summary: Legitimate interests access
                 value:
@@ -272,9 +922,7 @@ paths:
                         addressLine1: "5 Tech Park"
                         townCity: "Manchester"
                         postcode: "M1 2AB"
-                    pii-principal:
-                      mpxn: "1234567890123"
-                      move-in-date: "2020-01-01"
+                    identity-record-ref: "ir_b4d6f8a0c2e4b4d6f8a0c2e4"
                   notice: null
                   processing:
                     legal-basis: "uk-legitimate-interests"
@@ -301,9 +949,7 @@ paths:
                         addressLine1: "1 Grid House"
                         townCity: "Leeds"
                         postcode: "LS1 1AA"
-                    pii-principal:
-                      mpxn: "1234567890123"
-                      move-in-date: "2019-06-01"
+                    identity-record-ref: "ir_c5e7a9b1d3f5c5e7a9b1d3f5"
                   notice: null
                   processing:
                     legal-basis: "uk-public-task"
@@ -351,6 +997,12 @@ paths:
 
         **Authentication:** Unauthenticated by design. The access key acts as the
         credential; treat it as a secret.
+
+        **Note on PII:** This endpoint returns no PII. The person-property relationship
+        (MPxN, address, move-in date, identity verification) is held in the linked
+        Identity Record, which is accessible only to authenticated Data Users via
+        `GET /identity-records/{ir}`. The `identity-record-ref` in `record-metadata`
+        provides the link.
 
         **Verification checklist (all record types):**
         1. `access-event.state` must be `ACTIVE`.
@@ -400,8 +1052,10 @@ paths:
         payload.
 
         Use this to:
-        - Refresh a consent record when the customer renews (e.g. update `expiry`,
-          `notice-version`, or `principal-verification`)
+        - Refresh a consent record when the customer renews (e.g. update `expiry`
+          or `notice-version`). To update identity verification evidence, update
+          the linked Identity Record via `POST /identity-records` and update
+          `record-metadata.identity-record-ref` to the new `ir` key.
         - Correct an error in a submitted record
         - Update `processing.purpose` or `data-types` after a scope change
 
@@ -1157,6 +1811,15 @@ components:
         creation. Treat as a secret — possession enables access verification.
       example: "ak_691df0c788ca043403b7fa90"
 
+    IdentityRecordKey:
+      type: string
+      pattern: "^ir_[0-9a-f]{24}$"
+      description: >
+        Unique opaque identifier for an Identity Record, issued by the register on
+        creation. Referenced from `record-metadata.identity-record-ref` on an
+        AccessRecord to link the two resources.
+      example: "ir_a3c5e7f9b1d3a3c5e7f9b1d3"
+
     DataType:
       type: array
       minItems: 1
@@ -1325,6 +1988,457 @@ components:
         - mpxn
         - move-in-date
 
+    # -------------------------------------------------------------------------
+    # Identity Records — person-property relationship and re-identification
+    # -------------------------------------------------------------------------
+
+    CredentialId:
+      type: string
+      pattern: "^cred_[0-9a-f]{24}$"
+      description: Unique identifier for a registered passkey credential.
+      example: "cred_1a2b3c4d5e6f1a2b3c4d5e6f"
+
+    PasskeyCredentialSummary:
+      type: object
+      description: >
+        Metadata for a registered passkey credential. Public key material is
+        never returned — only the credential ID and registration timestamp.
+      properties:
+        credential-id:
+          $ref: "#/components/schemas/CredentialId"
+        registered-at:
+          type: string
+          format: date-time
+          description: UTC timestamp when this credential was registered.
+          example: "2024-01-15T09:35:00Z"
+        transports:
+          type: array
+          description: >
+            Authenticator transport hints as reported by the browser at registration
+            (e.g. "internal", "hybrid", "usb"). Informational only.
+          items:
+            type: string
+          example:
+            - internal
+      required:
+        - credential-id
+        - registered-at
+
+    ReIdentifyMethod:
+      type: string
+      description: |
+        The re-identification method to use or the step in a multi-step flow.
+
+        **Single-step:**
+        - `magic-link` — dispatch a signed link to the stored email address.
+          Poll `GET /identity-records/{ir}/re-identify/{token-ref}` for completion.
+
+        **Two-step passkey assertion (existing credential):**
+        - `passkey-assert` — initiate: returns a WebAuthn assertion challenge.
+          Pass to `navigator.credentials.get()`.
+        - `passkey-assert-complete` — complete: submit the signed assertion
+          response. Returns `verified: true` on success.
+
+        **Two-step passkey registration (new device):**
+        - `passkey-register` — initiate: returns a WebAuthn registration challenge.
+          Pass to `navigator.credentials.create()`, then submit to
+          `POST /identity-records/{ir}/credentials` to store the public key.
+          Re-identification is confirmed on successful credential registration.
+      enum:
+        - magic-link
+        - passkey-assert
+        - passkey-assert-complete
+        - passkey-register
+
+    ReIdentifyRequest:
+      type: object
+      description: >
+        Request body for `POST /identity-records/{ir}/re-identify`.
+      properties:
+        method:
+          $ref: "#/components/schemas/ReIdentifyMethod"
+        assertion-response:
+          type: object
+          nullable: true
+          description: >
+            Required when `method` is `passkey-assert-complete`. The serialised
+            `AuthenticatorAssertionResponse` from `navigator.credentials.get()`.
+          properties:
+            credential-id:
+              type: string
+              description: Base64url-encoded credential ID from the browser response.
+              example: "AQIDBAUGBwgJCgsMDQ4PEA"
+            client-data-json:
+              type: string
+              description: Base64url-encoded `clientDataJSON` from the authenticator response.
+              example: "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0IiwiY2hhbGxlbmdlIjoiWTJoaGJHeGxibWRsWDJWNFlXMXdiR1ZmWW1GelpUWTBkWEpzIn0"
+            authenticator-data:
+              type: string
+              description: Base64url-encoded `authenticatorData` from the authenticator response.
+              example: "SZYN5YgOjGh0NBcPZHZgW4_krrmihjLHmVzzuoMdl2MFAAAAAA"
+            signature:
+              type: string
+              description: Base64url-encoded `signature` from the authenticator response.
+              example: "MEUCIQDKypPONFnLSLpRJ_..."
+          required:
+            - credential-id
+            - client-data-json
+            - authenticator-data
+            - signature
+      required:
+        - method
+
+    PasskeyOptions:
+      type: object
+      description: >
+        WebAuthn options to pass to `navigator.credentials.create()` (registration)
+        or `navigator.credentials.get()` (assertion). Present when the method
+        initiates a passkey ceremony; null otherwise.
+      properties:
+        challenge:
+          type: string
+          description: Base64url-encoded WebAuthn challenge. Single-use; expires after 5 minutes.
+          example: "Y2hhbGxlbmdlX2V4YW1wbGVfYmFzZTY0dXJs"
+        rp-id:
+          type: string
+          description: Relying Party identifier.
+          example: "central.consent"
+        timeout:
+          type: integer
+          description: Suggested client-side timeout in milliseconds.
+          example: 60000
+        rp-name:
+          type: string
+          description: Human-readable Relying Party name. Present for registration challenges only.
+          example: "Data Access Register"
+          nullable: true
+        user-id:
+          type: string
+          description: >
+            Base64url-encoded opaque user handle for WebAuthn registration. Present
+            for registration challenges only. Not a PII identifier.
+          example: "aXJfYTNjNWU3ZjliMWQz"
+          nullable: true
+        user-name:
+          type: string
+          description: >
+            Display name shown by the authenticator during registration. Typically
+            the customer's email address. Present for registration challenges only.
+          example: "customer@example.com"
+          nullable: true
+        allowed-credentials:
+          type: array
+          description: >
+            Credential IDs the authenticator may use for assertion. Present for
+            assertion challenges only. Null for registration challenges.
+          nullable: true
+          items:
+            $ref: "#/components/schemas/CredentialId"
+          example:
+            - cred_1a2b3c4d5e6f1a2b3c4d5e6f
+      required:
+        - challenge
+        - rp-id
+        - timeout
+
+    MagicLinkDetails:
+      type: object
+      description: >
+        Present when a magic-link re-identification was initiated. Null for passkey methods.
+      properties:
+        dispatched-to:
+          type: string
+          description: >
+            Redacted representation of the email address the link was dispatched to
+            (e.g. "c*****r@example.com"). The full address is never echoed back.
+          example: "c*****r@example.com"
+        expires-at:
+          type: string
+          format: date-time
+          description: UTC timestamp when the magic link expires (15 minutes from dispatch).
+          example: "2026-03-24T09:15:00Z"
+        token-ref:
+          type: string
+          pattern: "^mlr_[0-9a-f]{24}$"
+          description: >
+            Opaque reference used to poll `GET /identity-records/{ir}/re-identify/{token-ref}`
+            for confirmation of link redemption.
+          example: "mlr_9f8e7d6c5b4a9f8e7d6c5b4a"
+      required:
+        - dispatched-to
+        - expires-at
+        - token-ref
+
+    ReIdentifyResponse:
+      type: object
+      properties:
+        response:
+          $ref: "#/components/schemas/ResponseMetadata"
+        method:
+          $ref: "#/components/schemas/ReIdentifyMethod"
+        verified:
+          type: boolean
+          description: >
+            `true` when re-identification is confirmed in this response (i.e.
+            `passkey-assert-complete` succeeded). `false` for all initiation steps
+            where confirmation is pending.
+          example: false
+        magic-link:
+          nullable: true
+          description: Populated for `magic-link` method; null otherwise.
+          allOf:
+            - $ref: "#/components/schemas/MagicLinkDetails"
+        passkey:
+          nullable: true
+          description: >
+            Populated for `passkey-assert` and `passkey-register` initiation steps;
+            null for `magic-link` and `passkey-assert-complete`.
+          allOf:
+            - $ref: "#/components/schemas/PasskeyOptions"
+      required:
+        - response
+        - method
+        - verified
+
+    ReIdentifyStatusResponse:
+      type: object
+      description: Status of a pending magic-link re-identification flow.
+      properties:
+        response:
+          $ref: "#/components/schemas/ResponseMetadata"
+        status:
+          type: string
+          description: |
+            - `pending` — link dispatched, awaiting customer redemption.
+            - `confirmed` — customer redeemed the link; re-identification complete.
+            - `expired` — 15-minute window elapsed without redemption.
+          enum:
+            - pending
+            - confirmed
+            - expired
+        confirmed-at:
+          type: string
+          format: date-time
+          nullable: true
+          description: UTC timestamp of redemption. Null until `status` is `confirmed`.
+          example: "2026-03-24T09:07:28Z"
+      required:
+        - response
+        - status
+        - confirmed-at
+
+    CreateIdentityRecordRequest:
+      type: object
+      description: >
+        Request body for `POST /identity-records`. Extends the core `IdentityRecord`
+        fields with `email` and `initiate-passkey-registration`.
+      properties:
+        pii-principal:
+          $ref: "#/components/schemas/PIIPrincipal"
+        expressed-by:
+          $ref: "#/components/schemas/ExpressionByEntity"
+          description: >
+            Who expressed consent or initiated the access registration — the data
+            subject themselves, or an authorised representative.
+        principal-verification:
+          nullable: true
+          description: >
+            How the Controller verified the identity of the principal. Strongly
+            recommended. Null if no structured verification was performed.
+          allOf:
+            - $ref: "#/components/schemas/PrincipalVerification"
+        email:
+          type: string
+          format: email
+          nullable: true
+          description: >
+            Customer email address. Stored as a one-way hash — never returned in
+            plaintext in any response. Required if magic-link re-identification is
+            to be used. Also enables email-based lookup via
+            `GET /identity-records?email=...`.
+          example: "customer@example.com"
+        initiate-passkey-registration:
+          type: boolean
+          default: false
+          description: >
+            If `true`, the register generates a WebAuthn registration challenge and
+            returns it in `passkey-registration-options`. The Data User must pass
+            these options to `navigator.credentials.create()` and submit the
+            resulting credential to `POST /identity-records/{ir}/credentials` to
+            complete registration.
+      required:
+        - pii-principal
+        - expressed-by
+
+    CreateIdentityRecordResponse:
+      type: object
+      properties:
+        response:
+          $ref: "#/components/schemas/ResponseMetadata"
+        ir:
+          $ref: "#/components/schemas/IdentityRecordKey"
+        passkey-registration-options:
+          nullable: true
+          description: >
+            Populated when `initiate-passkey-registration` was `true`. Pass to
+            `navigator.credentials.create()` in the browser, then submit the result
+            to `POST /identity-records/{ir}/credentials`. Null otherwise.
+          allOf:
+            - $ref: "#/components/schemas/PasskeyOptions"
+      required:
+        - response
+        - ir
+
+    IdentityRecord:
+      type: object
+      description: |
+        Holds the person-property relationship for a consent or access registration.
+        Returned by `GET /identity-records/{ir}`.
+
+        The `email` field is never returned in plaintext — `has-email` indicates
+        whether an email address is stored. Passkey public keys are never returned —
+        `credentials` contains only metadata (ID, registered-at, transports).
+
+        `ir` and `created-at` are assigned by the register on creation.
+      properties:
+        ir:
+          readOnly: true
+          $ref: "#/components/schemas/IdentityRecordKey"
+        created-at:
+          type: string
+          format: date-time
+          readOnly: true
+          description: UTC timestamp when this record was created in the register.
+          example: "2024-01-15T09:30:00Z"
+        pii-principal:
+          nullable: true
+          description: Null if the record has been anonymised.
+          allOf:
+            - $ref: "#/components/schemas/PIIPrincipal"
+        expressed-by:
+          nullable: true
+          allOf:
+            - $ref: "#/components/schemas/ExpressionByEntity"
+        principal-verification:
+          nullable: true
+          allOf:
+            - $ref: "#/components/schemas/PrincipalVerification"
+        has-email:
+          type: boolean
+          readOnly: true
+          description: >
+            `true` if an email address is stored on this record (enabling magic-link
+            re-identification). The address itself is never returned.
+          example: true
+        credentials:
+          type: array
+          readOnly: true
+          description: >
+            Metadata for registered passkey credentials. Public key material is
+            never returned. Empty if no passkeys are registered.
+          items:
+            $ref: "#/components/schemas/PasskeyCredentialSummary"
+        anonymised-at:
+          type: string
+          format: date-time
+          nullable: true
+          readOnly: true
+          description: >
+            UTC timestamp of anonymisation, if the record has been anonymised via
+            `DELETE /identity-records/{ir}`. Null otherwise.
+          example: null
+      required:
+        - ir
+        - created-at
+        - has-email
+        - credentials
+
+    AnonymiseIdentityRecordResponse:
+      type: object
+      properties:
+        response:
+          $ref: "#/components/schemas/ResponseMetadata"
+        ir:
+          $ref: "#/components/schemas/IdentityRecordKey"
+        anonymised-at:
+          type: string
+          format: date-time
+          description: UTC timestamp of anonymisation.
+          example: "2026-03-24T10:00:00Z"
+      required:
+        - response
+        - ir
+        - anonymised-at
+
+    LookupIdentityRecordsResponse:
+      type: object
+      properties:
+        response:
+          $ref: "#/components/schemas/ResponseMetadata"
+        identity-records:
+          type: array
+          items:
+            $ref: "#/components/schemas/IdentityRecord"
+      required:
+        - response
+        - identity-records
+
+    GetIdentityRecordResponse:
+      type: object
+      properties:
+        response:
+          $ref: "#/components/schemas/ResponseMetadata"
+        identity-record:
+          $ref: "#/components/schemas/IdentityRecord"
+      required:
+        - response
+        - identity-record
+
+    RegisterCredentialRequest:
+      type: object
+      description: >
+        Serialised `AuthenticatorAttestationResponse` from `navigator.credentials.create()`.
+        Submit to `POST /identity-records/{ir}/credentials` to complete a passkey
+        registration ceremony.
+      properties:
+        client-data-json:
+          type: string
+          description: Base64url-encoded `clientDataJSON` from the attestation response.
+          example: "eyJ0eXBlIjoid2ViYXV0aG4uY3JlYXRlIiwiY2hhbGxlbmdlIjoiWTJoaGJHeGxibWRsWDJWNFlXMXdiR1ZmWW1GelpUWTBkWEpzIiwib3JpZ2luIjoiaHR0cHM6Ly9jZW50cmFsLmNvbnNlbnQifQ"
+        attestation-object:
+          type: string
+          description: Base64url-encoded `attestationObject` from the attestation response.
+          example: "o2NmbXRkbm9uZWdhdHRTdG10oGhhdXRoRGF0YVik..."
+        transports:
+          type: array
+          description: >
+            Authenticator transport hints reported by the browser. Stored as metadata;
+            used to populate `allowed-credentials` in future assertion challenges.
+          items:
+            type: string
+          example:
+            - internal
+      required:
+        - client-data-json
+        - attestation-object
+
+    RegisterCredentialResponse:
+      type: object
+      properties:
+        response:
+          $ref: "#/components/schemas/ResponseMetadata"
+        credential-id:
+          $ref: "#/components/schemas/CredentialId"
+        registered-at:
+          type: string
+          format: date-time
+          description: UTC timestamp when the credential was stored.
+          example: "2024-01-15T09:35:00Z"
+      required:
+        - response
+        - credential-id
+        - registered-at
+
     RecordMetadata:
       type: object
       description: |
@@ -1332,6 +2446,12 @@ components:
 
         `record-identifier` and `created-at` are assigned by the register on creation
         and returned in responses; they must not be supplied in request bodies.
+
+        `identity-record-ref` links this access record to the Identity Record that
+        holds the person-property relationship (PII principal, move-in date, address,
+        and identity verification evidence). Supply the `ir` key returned when the
+        Identity Record was created. The linked Identity Record must have been
+        registered by the same authenticated Data User.
       properties:
         schema-version:
           type: string
@@ -1350,12 +2470,16 @@ components:
           example: "2024-01-15T09:30:00Z"
         controller:
           $ref: "#/components/schemas/Controller"
-        pii-principal:
-          $ref: "#/components/schemas/PIIPrincipal"
+        identity-record-ref:
+          $ref: "#/components/schemas/IdentityRecordKey"
+          description: >
+            Reference to the Identity Record holding the person-property relationship
+            for this access registration. The `ir` key is issued when the Identity
+            Record is created via `POST /identity-records`.
       required:
         - schema-version
         - controller
-        - pii-principal
+        - identity-record-ref
 
     # -------------------------------------------------------------------------
     # ISO 27560 Section 2: Notice Fields
@@ -1608,6 +2732,10 @@ components:
         Consent-specific event details. Nested within `access-event`. Must be
         populated when `processing.legal-basis` is a consent value; must be null
         for all other legal bases.
+
+        Identity verification evidence and the expressed-by party are held in the
+        linked Identity Record (`record-metadata.identity-record-ref`), not here.
+        This object records only the legal character of the consent event itself.
       properties:
         consent-type:
           $ref: "#/components/schemas/ConsentType"
@@ -1618,22 +2746,9 @@ components:
             Mechanism through which consent was expressed — how the principal
             indicated their agreement (e.g. "Explicit web checkbox",
             "Signed paper form", "Voice recording", "In-app toggle").
-            This field records consent expression, not identity verification.
-            Identity verification is recorded in `principal-verification`.
           example: "Explicit web checkbox"
-        expressed-by:
-          $ref: "#/components/schemas/ExpressionByEntity"
-        principal-verification:
-          nullable: true
-          description: >
-            How the Controller verified the identity of the principal before
-            consent was obtained. Strongly recommended for all consent records.
-            Null indicates no structured verification data was recorded.
-          allOf:
-            - $ref: "#/components/schemas/PrincipalVerification"
       required:
         - consent-type
-        - expressed-by
 
     AccessEventFields:
       type: object
@@ -2520,12 +3635,11 @@ components:
         Payload delivered when a consent-based access record is within the
         `notify-days-before` window of its expiry.
 
-        The full `access-record` is included so the Controller can identify
-        the customer and initiate a renewal flow without a separate API call.
-        The Controller should present the customer with an opportunity to renew
-        consent before `expires-at` is reached. If the customer does not renew,
-        the record will transition to `EXPIRED` state and the Data Provider will
-        deny further data access.
+        The `ak`, `mpxn`, and `controller-reference` fields allow the Controller
+        to locate the affected record and customer in their own system and initiate
+        a renewal flow. The full `access-record` is also included for completeness.
+        To retrieve the associated Identity Record (person-property relationship),
+        call `GET /identity-records/{ir}` using the `ir` in `access-record.record-metadata.identity-record-ref`.
 
         **Note:** This event is only fired once per record per expiry window.
         If the record is updated (e.g. expiry extended) a new event will be

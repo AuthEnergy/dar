@@ -9,36 +9,44 @@ tag: experimental
   **This is a design proposal for review and not yet a completed and implementable service.**<p/>
   If you wish to discuss the design with the author, please contact us at [contact@auth.energy](mailto:contact@auth.energy)
 </Warning>
+
 The register is not a consent register exclusively. It records access under any lawful basis — consent, legitimate interests, public task, legal obligation, or contract. The Central Register holds the registration only; it does not validate or enforce the legal basis claimed by the Controller.
 
 <Info>
   This is a practical, lightweight alternative to the full Consumer Consent Solution architecture. It records all lawful access and is presented as an open design for industry feedback. It also:
-- is ISO27650 compliant
+- is ISO 27560 compliant
 - supports any Customer (not just Consumers)
-- support any approved Identity Verification Scheme
+- supports any approved Identity Verification Scheme
 - supports any legal basis (Public Task / Legitimate Interest, Consent, etc)
 - automatic capture of discovered access (via DCC transaction logs)
-- notifies users of Change of Tenancy events (from DCC to use via webhook)
-- supports a Central Customer Portal as well as allowing consent to be displayed in any Customer facing service
+- notifies Data Users of Change of Tenancy events (from DCC via webhook)
+- supports a Central Customer Portal as well as allowing consent to be displayed in any customer-facing service
 - fully SEC compliant
-- supports seperate or combined Controllers/Users
-- centrally stores evidence (faster, more detailed SEC audits - no random sample required)
-- new controller/user terms can be automatically discovered and assest in realtime.
+- supports separate or combined Controllers/Users
+- centrally stores identity evidence (faster, more detailed SEC audits — no random sample required)
+- new controller/user terms can be automatically discovered and assessed in real time
 - historic and expired access can be added to the system at any time
+- re-identifies returning customers via passkey or magic link — no re-collection of details required
 </Info>
 
 Key flows:
 - [Registering an Access Record](#registering-an-access-record)
+- [Re-identifying a Returning Customer](#re-identifying-a-returning-customer)
 - [Verifying an Access Record](#verifying-an-access-record)
 - [Lifecycle Notifications](#lifecycle-notifications)
 
 ## Registering an Access Record
 
-The Controller obtains lawful basis from the Customer (or asserts it internally for non-consent bases) and registers it with the Central Register via the Data User API. The register stores the record and returns an access key.
+The Controller obtains lawful basis from the Customer (or asserts it internally for non-consent bases) and registers it with the Central Register via the Data User API.
+
+Registration is a two-step process:
+
+1. **Create an Identity Record** (`POST /identity-records`) — holds the person-property relationship: MPxN, move-in date, address, identity verification evidence, and optionally an email address and passkey for future re-identification.
+2. **Create an Access Record** (`POST /access-records`) — holds the legal basis, purpose, and data scope. References the Identity Record via `identity-record-ref`.
+
+This separation means the unauthenticated verification endpoint used by Data Providers never exposes customer PII.
 
 For consent-based records, the Data User captures the Customer's agreement before calling the register. Identity verification must meet the standard defined in **Smart Energy Code Section I** as approved by the SEC Privacy SubCommittee. The register stores what it is told; it does not re-verify the consent.
-
-Customers can view and revoke their access records at any time via the centralised customer portal or through the Data User's own application.
 
 ```mermaid
 sequenceDiagram
@@ -55,24 +63,80 @@ sequenceDiagram
     Customer->>Controller: Agreement
     Controller->>DU: Register access
     DU->>DU: Verify Customer (SEC Section I)
-    DU->>CR: POST /access-records
+    DU->>CR: POST /identity-records (pii-principal, email, verification)
+    CR->>DU: ir (Identity Record key)
+    DU->>CR: POST /access-records (identity-record-ref: ir, legal-basis, purpose)
     activate CR
-    CR->>CR: Store record
+    CR->>CR: Store records
     CR->>DU: Access key (ak)
     deactivate CR
     DU->>Controller: Confirmed
     Controller->>Customer: Confirmed
 ```
 
-Historic records and migrations from existing consent stores can be submitted using the same endpoint.
+Historic records and migrations from existing consent stores can be submitted using the same endpoints.
+
+## Re-identifying a Returning Customer
+
+When a customer returns — to renew consent, onboard with a new Controller, or access the Customer Portal — they can be re-identified against their existing Identity Record using a passkey or magic link. No re-collection of personal details is required.
+
+The Data User first looks up the Identity Record by MPxN or email (`GET /identity-records?mpxn=...`), then initiates the appropriate re-identification method.
+
+### Passkey (preferred — one tap)
+
+```mermaid
+sequenceDiagram
+    box For context
+        participant Customer
+    end
+    box In scope
+        participant DU as Data User
+        participant CR as Central Register
+    end
+
+    DU->>CR: POST /identity-records/{ir}/re-identify (passkey-assert)
+    CR->>DU: WebAuthn challenge
+    DU->>Customer: Browser passkey prompt
+    Customer->>DU: Biometric / PIN
+    DU->>CR: POST /identity-records/{ir}/re-identify (passkey-assert-complete)
+    CR->>DU: verified: true
+    DU->>CR: POST /access-records (identity-record-ref: ir)
+    CR->>DU: ak
+```
+
+### Magic Link (email fallback)
+
+```mermaid
+sequenceDiagram
+    box For context
+        participant Customer
+    end
+    box In scope
+        participant DU as Data User
+        participant CR as Central Register
+    end
+
+    DU->>CR: POST /identity-records/{ir}/re-identify (magic-link)
+    CR->>Customer: Magic link email (15 min)
+    CR->>DU: token-ref
+    Customer->>CR: Click link
+    DU->>CR: GET /identity-records/{ir}/re-identify/{token-ref}
+    CR->>DU: status: confirmed
+    DU->>CR: POST /access-records (identity-record-ref: ir)
+    CR->>DU: ak
+```
+
+See the [Identity Records guide](/dar/identity-records) for full details including passkey enrolment and credential management.
 
 ## Verifying an Access Record
 
 Before releasing meter data, the Data Provider verifies the access key and — on first encounter with a new Data User — looks up the Data User's status in the directory.
 
-<Note>The Data Provider maintains its own independant relationship with the Data User, it may choose to use the Verification mechanism described here **OR** to trust the Data User based on their own technical & commercial controls</Note>
+<Note>The Data Provider maintains its own independent relationship with the Data User. It may choose to use the verification mechanism described here **OR** to trust the Data User based on their own technical and commercial controls.</Note>
 
 Data Users are registered as **SEC Other Users**. Onboarding, accreditation, and suspension are managed through the SEC Other User process via an administration interface.
+
+The verification response contains no customer PII — identity evidence is held in the Identity Record and accessible only to authenticated Data Users.
 
 ```mermaid
 sequenceDiagram
@@ -88,7 +152,7 @@ sequenceDiagram
     Controller->>DU: Request data
     DU->>Data Provider: Request + access key (ak)
     Data Provider->>CR: GET /access-records/{ak}
-    CR->>Data Provider: Record (state, data-types, duid)
+    CR->>Data Provider: Record (state, data-types, duid) — no PII
     alt New duid
         Data Provider->>CR: GET /data-users/{duid}
         CR->>Data Provider: Status
@@ -101,12 +165,11 @@ The Data Provider is responsible for mapping the `duid` to its own platform acce
 
 ## Lifecycle Notifications
 
-Data Users can subscribe to webhook events to manage the access record lifecycle proactively. Both events are delivered to the same callback URL; the `event-type` field distinguishes them.
+Data Users subscribe to webhook events to manage the access record lifecycle proactively. All events are delivered to the same callback URL; the `event-type` field distinguishes them.
 
 ### Consent Withdrawal
-A Customer may withdraw consent at any time, either through the centralised customer portal (central initiated event) or through the Data User's own application. Withdrawal flows from the Customer through the Controller and Data User before the register is updated (initiated by Data User).
-On receipt of a withdrawal instruction, the Data User must call DELETE /access-records/{ak} immediately. The register transitions the record to REVOKED state and retains it for audit. The Data Provider will deny all subsequent data requests for that access key.
-<Note>If the Customer withdraws consent through the central service which they maybe contractually obligated to provide, the Controller/Data User has the opportunity to engage with the Customer and resolve any issues themselves</Note>
+
+A Customer may withdraw consent at any time through the centralised Customer Portal, or through the Data User's own application. When withdrawn via the Data User's application, the Data User calls `DELETE /access-records/{ak}` directly. When withdrawn via the portal, the register fires a `consent.withdrawal` webhook to the Data User immediately after the record is revoked.
 
 ```mermaid
 sequenceDiagram
@@ -127,9 +190,14 @@ sequenceDiagram
     DU->>Controller: Confirmed
     Controller->>Customer: Confirmed
 ```
+
+<Note>If the Customer withdraws consent through the central portal, the Controller/Data User has the opportunity to engage with the Customer and resolve any issues before data collection ceases entirely.</Note>
+
 ### Consent Expiry
 
-Fired when a consent-based access record is within the configured notification window (default 30 days) of its expiry date. The Data User should prompt the Customer to renew before access lapses. Customers can also renew directly via the centralised consumer portal.
+Fired when a consent-based access record is within the configured notification window (default 30 days) of its expiry date. The Data User should prompt the Customer to renew before access lapses. Customers can also renew directly via the Customer Portal.
+
+On renewal, the Data User creates a new Access Record (or replaces the existing one via `PUT /access-records/{ak}`) referencing the same `ir`. If the customer is returning after a gap, re-identification via passkey or magic link confirms their identity before the new record is registered.
 
 ```mermaid
 sequenceDiagram
@@ -143,17 +211,20 @@ sequenceDiagram
     end
 
     CR->>CR: Expiry window reached
-    CR->>DU: consent.expiring
+    CR->>DU: consent.expiring (webhook)
     DU->>Controller: Notify
     Controller->>Customer: Renew prompt
     Customer->>Controller: Renewed
     Controller->>DU: Submit renewal
-    DU->>CR: POST /access-records?ak={ak}
+    DU->>CR: PUT /access-records/{ak} (updated expiry)
+    CR->>DU: Confirmed
 ```
 
 ### Change of Tenancy
 
-The Central Register receives industry Change of Tenancy (CoT) events from the **DCC**. On receipt, it fires a webhook to any Data Users with active access records for the affected MPxN. The Data User, as the responsible SEC Other User, must consider this event and potentially cease data collection and revoke their registered records (noting CoT events are often false alerts). No new occupant PII is included in the payload.
+The Central Register receives industry Change of Tenancy (CoT) events from the **DCC**. On receipt, it fires a `tenancy.change` webhook to any Data Users with active access records for the affected MPxN. The Data User, as the responsible SEC Other User, must consider this event and potentially cease data collection and revoke their registered records. CoT events from the DCC are occasionally false alerts — Controllers should verify before revoking records held under non-occupancy legal bases (e.g. `uk-public-task`).
+
+No new occupant PII is included in the payload. The affected `ak` values are listed for targeted revocation without requiring a separate list query.
 
 ```mermaid
 sequenceDiagram
@@ -166,9 +237,9 @@ sequenceDiagram
         participant CR as Central Register
     end
 
-    Industry->>CR: CoT event (mpxn, effective-date)
+    Industry->>CR: POST /cot-events (mpxn, effective-date)
     CR->>CR: Match active records
-    CR->>DU: tenancy.change
+    CR->>DU: tenancy.change (affected-aks)
     DU->>Controller: Notify
     Controller->>Controller: Cease data collection
     Controller->>DU: Revoke
@@ -179,8 +250,9 @@ sequenceDiagram
 
 | Version | Date | Summary |
 |---------|------|---------|
-| 0.0.11 | 2026-03-20 | Added DCC CoT endpoint and split /access-records into POST/PUT
-| 0.0.10 | 2026-03-19 | Added Central Customer Portal design and redirect support |
-| 0.0.9 | 2026-03-18 | Added DCC interface for registering records discovered from their transaction log.| 
+| 0.0.12 | 2026-03-24 | Identity Records separated from Access Records. Re-identification via passkey and magic link added. `POST /customer-sessions` removed — Customer Portal accessed via direct URL with `ir`/`mpxn` parameter. |
+| 0.0.11 | 2026-03-20 | Added DCC CoT endpoint and split /access-records into POST/PUT. |
+| 0.0.10 | 2026-03-19 | Added Central Customer Portal design and redirect support. |
+| 0.0.9 | 2026-03-18 | Added DCC interface for registering records discovered from their transaction log. |
 | 0.0.8 | 2026-03-18 | Added EDP directory lookup (`GET /data-users/{duid}`) and webhook subscriptions for consent expiry and tenancy change events. |
 | 0.0.7 | 2026-03-11 | Initial release. |

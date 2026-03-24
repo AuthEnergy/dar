@@ -1,18 +1,19 @@
 ---
 title: Central Customer Portal
 sidebarTitle: Customer Portal
-description: A centralised web interface allowing customers to view, manage, and withdraw their energy data access records.
+description: A centralised web interface allowing customers to view and withdraw their energy data access records, accessed directly or via a Data User link.
 icon: user
 tag: experimental
 ---
 
 <Warning>
-The Customer Consent Portal is a planned component of the Data Access Register. This document describes the proposed design for review and feedback. This can compliment or replace the Data User in app presentation of the access information [List Records](/api-reference/data-users/list-access-records-for-a-meter-point)
+The Customer Consent Portal is a planned component of the Data Access Register. This document describes the proposed design for review and feedback. It can complement or replace the Data User in-app presentation of access records via [List Access Records](/api-reference/data-users/list-access-records-for-a-meter-point).
 
 Key design principles:
 
 - The portal is operated by the Central Register, not by individual Data Users
-- Customers access it via a redirect from any Data User application, or directly via a published URL
+- Customers access it directly at a published URL, or via a link from any Data User application
+- The portal authenticates the customer itself — no session token is issued by the Data User
 - All consent management actions taken in the portal are reflected immediately in the register
 - The portal cannot be embedded in an iframe by any party, including Data Users
 - The portal is read-only with respect to granting new access — consent is always obtained by the Data User
@@ -42,13 +43,22 @@ The interface shows:
 - **Discovered notice** — a prominently signposted alert when DCC-detected organisations are present
 - **Access records table** — all organisations in a single table, with status badges, plain-language legal basis, data type chips, terms links, registration and expiry dates, and either a **Withdraw** button (consent records) or a **Contact** link (non-consent and discovered records)
 - **Expired records** — shown at reduced opacity for reference but with no available action
-- **Return link** — links back to the originating Data User application
+- **Return link** — shown when the customer arrived via a Data User link carrying a `return` parameter
 
 ## Accessing the Portal
 
-### Via a Data User Application
+### Via a Data User Link
 
-Data Users redirect customers to the portal after authenticating them on their own platform. The Data User calls `POST /customer-sessions` to obtain a short-lived redirect token and portal URL, then opens it in a new browser window.
+Data Users link customers directly to the portal once they have authenticated the customer in their own application. No API call is required — the Data User constructs a portal URL carrying the customer's `ir` key (preferred) or `mpxn`, plus an optional `return` parameter.
+
+```
+https://portal.central.consent?ir={ir}&return={url}
+https://portal.central.consent?mpxn={mpxn}&return={url}
+```
+
+The `ir` key is preferred as it resolves directly to the Identity Record without a lookup step. The `return` parameter must exactly match a URL pre-registered for the Data User's DUID — the portal validates it server-side on load and rejects unrecognised values.
+
+The portal then authenticates the customer itself using the re-identification mechanisms on the Identity Record before showing any data:
 
 ```mermaid
 sequenceDiagram
@@ -58,58 +68,94 @@ sequenceDiagram
     end
     box In scope
         participant DU as Data User
-        participant CR as Central Register
         participant Portal as Customer Portal
+        participant CR as Central Register
     end
 
     Customer->>Controller: View my consents
-    Controller->>DU: Request portal session
-    DU->>CR: POST /customer-sessions (mpxn, return-url, purpose)
-    CR->>DU: Redirect token (60s) + portal-url
-    DU->>Controller: portal-url
-    Controller->>Customer: Open portal-url (new window)
-    Customer->>Portal: Land with redirect token
-    Portal->>CR: Redeem token — issue portal session cookie (8hr)
-    Portal->>Customer: Render access records
+    Controller->>DU: Open portal
+    DU->>Customer: Open portal URL (ir + return param)
+    Customer->>Portal: Land on portal
+    Portal->>CR: Resolve ir / mpxn → Identity Record
+    Portal->>Customer: Re-identification challenge
+    note over Customer,Portal: Passkey tap, magic-link click,<br/>or supplier OAuth
+    Customer->>Portal: Identity confirmed
+    Portal->>CR: Fetch access records
+    Portal->>Customer: Render full access records
 ```
 
-The redirect token is single-use and expires in 60 seconds — it exists only to survive the browser redirect. On redemption the portal issues its own session with a TTL of up to 8 hours, renewable on activity. The Data User never has access to the portal session.
+The customer must successfully complete re-identification before any records are shown. A Data User cannot view the portal on a customer's behalf by constructing the URL themselves — the portal will present the re-identification challenge regardless of how the URL was formed.
 
 ### Direct Access
 
-Customers may also navigate directly to the portal at `https://portal.central.consent`. In this case they authenticate using their energy account credentials via their supplier, using a standard OAuth 2.0 authorisation code flow against the supplier's identity provider.
+Customers may navigate directly to the portal at `https://portal.central.consent` without a Data User link. They enter their MPAN or registered email address and the portal initiates the same re-identification flow.
 
-<Note>Direct access requires the customer's supplier to be integrated with the portal's identity federation. This is a phased capability — Data User redirect access is available from launch; direct access follows as supplier integration is completed.</Note>
+<Note>Direct access via email lookup requires an email address to be stored on the customer's Identity Record. Customers whose Data User has not registered an email can still access the portal directly by entering their MPAN and completing supplier OAuth authentication.</Note>
+
+## Authentication — Re-identification Flow
+
+The portal always authenticates the customer against their Identity Record before issuing a portal session. Three mechanisms are supported, tried in order of preference:
+
+| Method | Condition | Customer experience |
+|--------|-----------|-------------------|
+| **Passkey** | At least one passkey credential registered on the Identity Record | Browser biometric prompt — one tap |
+| **Magic link** | Email address stored on the Identity Record | Link sent to stored email; customer clicks to confirm |
+| **Supplier OAuth** | Fallback — no passkey or email on record | Redirected to supplier login, then back to portal |
+
+The re-identification challenge is initiated against the Identity Record resolved from the `ir` or `mpxn` parameter. For direct access, the portal looks up the Identity Record after the customer enters their MPAN or email.
+
+```mermaid
+sequenceDiagram
+    participant Customer
+    participant Portal as Customer Portal
+    participant CR as Central Register
+
+    Portal->>CR: Resolve Identity Record
+    alt Passkey registered
+        Portal->>Customer: Browser passkey prompt
+        Customer->>Portal: Biometric / PIN
+        Portal->>CR: POST /identity-records/{ir}/re-identify (passkey-assert)
+        CR->>Portal: Challenge
+        Portal->>Customer: navigator.credentials.get()
+        Customer->>Portal: Signed assertion
+        Portal->>CR: POST /identity-records/{ir}/re-identify (passkey-assert-complete)
+        CR->>Portal: verified: true
+    else Email stored
+        Portal->>CR: POST /identity-records/{ir}/re-identify (magic-link)
+        CR->>Customer: Magic link email
+        Customer->>Portal: Click link
+        Portal->>CR: GET /identity-records/{ir}/re-identify/{token-ref}
+        CR->>Portal: status: confirmed
+    else Fallback
+        Portal->>Customer: Redirect to supplier OAuth
+        Customer->>Portal: OAuth callback
+    end
+    Portal->>Portal: Issue portal session cookie
+    Portal->>Customer: Render access records
+```
 
 ## Session Model
 
-| Token | Issued by | TTL | Purpose |
-|-------|-----------|-----|---------|
-| Redirect token (`cst_...`) | `POST /customer-sessions` | 60 seconds, single-use | Survives the browser redirect |
-| Portal session | Portal on redirect token redemption | Up to 8 hours, renewable | Authenticates the customer within the portal |
+Once re-identification is confirmed the portal issues its own session — a server-side session stored as an `httpOnly`, `Secure`, `SameSite=Strict` cookie on the portal domain. It is not accessible to JavaScript and never exposed to the Data User.
 
-The portal session is stored as an `httpOnly`, `Secure`, `SameSite=Strict` cookie on the portal domain. It is never exposed to the Data User application or accessible via JavaScript.
+| Property | Value |
+|----------|-------|
+| Session cookie | `httpOnly`, `Secure`, `SameSite=Strict` — not accessible to JavaScript |
+| TTL | Up to 8 hours, renewable on activity |
+| Scope | Bound to the single MPxN resolved at re-identification |
+| Access | Never exposed to the originating Data User |
 
-## Purpose and Scope
-
-When calling `POST /customer-sessions`, the Data User declares a `purpose`:
-
-| Value | Portal behaviour |
-|-------|-----------------|
-| `view` | Customer can browse records. Withdrawal controls are not shown. |
-| `manage` | Customer can browse records and withdraw consent for active consent-based records. |
-
-The portal enforces the declared purpose — a Data User cannot cause withdrawal controls to appear by manipulating the browser or the redirect URL. The purpose is recorded in the audit trail.
+A customer cannot navigate to another customer's records within the same portal session.
 
 ## What the Customer Sees
 
-### Access Record List
+The portal always shows the full access record view — customers can see and manage all their records regardless of which Data User linked them to the portal.
 
-The portal displays all access records for the customer's meter point, grouped by state:
+### Access Record List
 
 | State | Description | Action available |
 |-------|-------------|-----------------|
-| `ACTIVE` | Currently authorised access | Withdraw (consent records, `manage` sessions only) |
+| `ACTIVE` | Currently authorised access | Withdraw (consent records only) |
 | `DISCOVERED` | Detected from DCC historic logs — organisation not yet registered | None — informational only |
 | `EXPIRED` | Access period has ended | None |
 | `REVOKED` | Previously withdrawn or removed | None |
@@ -135,7 +181,7 @@ For each record the customer can see:
 
 ## Withdrawing Consent
 
-Customers can withdraw consent for any record where the legal basis is `uk-consent` or `uk-explicit-consent` and the state is `ACTIVE`, provided the session was created with `purpose: manage`.
+Customers can withdraw consent for any record where the legal basis is `uk-consent` or `uk-explicit-consent` and the state is `ACTIVE`.
 
 <Warning>
 Withdrawing consent may affect services you currently receive from the organisation. Before confirming, the portal will display:
@@ -145,7 +191,7 @@ Withdrawing consent may affect services you currently receive from the organisat
 - That historic data already collected is not deleted — only future access is stopped
 </Warning>
 
-On confirmation, the portal calls `DELETE /access-records/{ak}` using its own server-side credentials. The record transitions to `REVOKED` state immediately. The Data User then receives a `consent.withdrawal` webhook — this is fired in real time after the record is revoked, not as a request for permission.
+On confirmation, the portal calls `DELETE /access-records/{ak}` using its own server-side credentials. The record transitions to `REVOKED` state immediately. The Data User then receives a `consent.withdrawal` webhook in real time.
 
 ```mermaid
 sequenceDiagram
@@ -165,10 +211,10 @@ sequenceDiagram
     CR->>CR: Record REVOKED
     CR->>DU: consent.withdrawal (webhook)
     CR->>Portal: Confirmed
-    Portal->>Customer: Withdrawal confirmed
+    Portal->>Customer: Withdrawal confirmed + return link
 ```
 
-After withdrawal, the portal redirects the customer to the Data User's `return-url` with `?dar-action=withdrawn&ak={ak}` appended, allowing the application to update its UI without waiting for the webhook.
+If the customer arrived via a Data User link carrying a `return` parameter, the portal shows a return link with `?dar-action=withdrawn&ak={ak}` appended, allowing the Data User application to update its UI without waiting for the webhook.
 
 <Note>Non-consent records (`uk-legitimate-interests`, `uk-public-task`, `uk-legal-obligation`, `uk-contract`) cannot be withdrawn by the customer through the portal. The customer is shown the organisation's contact URL and advised to raise a dispute directly, with Ofgem as a further escalation route.</Note>
 
@@ -177,8 +223,8 @@ After withdrawal, the portal redirects the customer to the Data User's `return-u
 **The portal cannot be embedded in a frame.**
 All portal responses include `X-Frame-Options: DENY` and `Content-Security-Policy: frame-ancestors 'none'`. Any attempt to load the portal inside an iframe — including by the Data User's own application — fails silently in the browser.
 
-**The MPxN is never in the URL.**
-The redirect token is opaque. The MPxN is resolved server-side on redemption and held only in the portal's server-side session. It does not appear in browser history, server logs, or referrer headers.
+**The MPxN is never in the session.**
+Once re-identification is complete, the MPxN is held only in the portal's server-side session. It does not appear in browser history, server logs, or referrer headers after the initial page load.
 
 **Revocation is server-to-server.**
 The portal calls `DELETE /access-records/{ak}` using its own privileged credentials, not any credential supplied by the Data User or customer. The customer cannot craft API requests directly.
@@ -186,15 +232,16 @@ The portal calls `DELETE /access-records/{ak}` using its own privileged credenti
 **Portal sessions are bound to a single MPxN.**
 A customer cannot navigate to another customer's records within the same portal session, regardless of what they supply in the URL.
 
-**`return-url` is whitelisted.**
-The portal only links back to URLs pre-registered by the Data User. Unregistered return URLs are rejected at `POST /customer-sessions` with `400`. The portal will not redirect to an arbitrary URL.
+**`return` parameter is allowlisted.**
+The portal only links back to URLs pre-registered for the DUID associated with the Identity Record. The portal resolves the DUID from the Identity Record server-side and validates the `return` parameter against the Data User's registered callback URLs. Unrecognised values are silently ignored — the portal renders without a return link.
 
-**Rate limiting on session creation.**
-The register monitors `POST /customer-sessions` call patterns per Data User. Sessions created without corresponding redemption activity are flagged. Anomalous patterns trigger alerts and may result in temporary suspension of session creation for that Data User.
+**Data Users cannot impersonate customers.**
+The portal always requires the customer to complete re-identification regardless of how the URL was formed. A Data User constructing a portal URL with a customer's `ir` or `mpxn` will be presented with a re-identification challenge they cannot complete on the customer's behalf.
 
 ## Change Log
 
 | Version | Date | Summary |
 |---------|------|---------|
+| 0.0.12 | 2026-03-24 | Removed `POST /customer-sessions` endpoint. Portal now uses direct URL linking with `ir`/`mpxn` + `return` parameters. Customer re-identification via passkey, magic link, or OAuth is required before portal session is issued. |
 | 0.0.10 | 2026-03-19 | Added `purpose` field, iframe blocking, `consent.withdrawal` webhook, `dar-action` return signal, and security controls section. |
 | 0.0.9 | 2026-03-19 | Initial design draft. |
