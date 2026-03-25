@@ -92,6 +92,13 @@ tags:
     customers via email magic link or WebAuthn passkey.
 
     '
+- name: Re-identification
+  description: Endpoints for initiating and confirming customer re-identification
+    flows. Supports magic link, passkey assertion, and passkey registration — both
+    for the same Data User (same-DUID) and for a second Data User linking to an existing
+    Identity Record created by another Data User (cross-DUID). In the cross-DUID flow
+    the `ir` key is never exposed to the initiating Data User — the register resolves
+    it internally after the customer completes the challenge.
 - name: Authentication
   description: Obtain bearer tokens for authenticated endpoints.
 - name: Data Users
@@ -572,7 +579,7 @@ paths:
 
         '
       tags:
-      - Identity Records
+      - Re-identification
       security:
       - bearerAuth: []
       parameters:
@@ -718,7 +725,7 @@ paths:
 
         '
       tags:
-      - Identity Records
+      - Re-identification
       security:
       - bearerAuth: []
       parameters:
@@ -1703,7 +1710,7 @@ paths:
         a re-identification challenge without needing to know which Data User created
         the record.'
       tags:
-      - Identity Records
+      - Re-identification
       security:
       - bearerAuth: []
       parameters:
@@ -1769,7 +1776,7 @@ paths:
         the token cannot be used. A Data User cannot manufacture a valid token or
         re-use one after consumption.'
       tags:
-      - Identity Records
+      - Re-identification
       security:
       - bearerAuth: []
       requestBody:
