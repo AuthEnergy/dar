@@ -134,6 +134,20 @@ def re_identify(ir, token_payload):
     return ok({"response": meta(f"/v1/identity-records/{ir}/re-identify"), **result})
 
 
+@bp.route("/v1/identity-records/reidentify/<token_ref>", methods=["GET"])
+@require_bearer("data_user")
+def poll_reidentify_by_token_ref(token_ref, token_payload):
+    """Poll cross-DUID re-identification status by token-ref alone.
+    Data User B uses this after POST /identity-records/reidentify — they hold
+    a token-ref but not the ir key."""
+    result, error = db.poll_reidentify_by_token_ref(token_ref, token_payload["duid"])
+    if error == "FORBIDDEN":
+        return err("This token was not initiated by your account", 403, "AUTH003")
+    if error == "NOT_FOUND":
+        return err("Token not found", 404, "NOT001")
+    return ok({"response": meta(f"/v1/identity-records/reidentify/{token_ref}"), **result})
+
+
 @bp.route("/v1/identity-records/reidentify", methods=["POST"])
 @require_bearer("data_user")
 def reidentify_by_mpxn(token_payload):

@@ -174,8 +174,8 @@ def validate_access_record(body: dict) -> list[str]:
         errors.append("access-event.registered-at required")
     if "expiry" not in ae:
         errors.append("access-event.expiry required (use null for no expiry)")
-    if "consent" not in ae:
-        errors.append("access-event.consent required (use null for non-consent bases)")
+    # consent key only required for consent-based legal bases
+    # for non-consent bases it must be absent or null (validated below)
 
     # notice / consent cross-validation
     if legal_basis in CONSENT_BASES:

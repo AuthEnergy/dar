@@ -308,6 +308,25 @@ def initiate_reidentify_by_mpxn(mpxn: str, initiating_duid: str, method: str,
 
     return None, "INVALID_METHOD"
 
+def poll_reidentify_by_token_ref(token_ref: str, initiating_duid: str) -> tuple[dict | None, str]:
+    """Poll cross-DUID re-identification status by token-ref alone (no ir needed).
+    Used by Data User B who holds a token-ref but not the ir key."""
+    all_irs = _find("dar_identity", {"type": "identity_record"}, 500)
+    for doc in all_irs:
+        tokens = doc.get("pending_reidentify_tokens", {})
+        if token_ref not in tokens:
+            continue
+        token = tokens[token_ref]
+        if token.get("initiating_duid") != initiating_duid:
+            return None, "FORBIDDEN"
+        return {
+            "method":       token.get("method"),
+            "status":       token.get("status", "pending"),
+            "confirmed-at": token.get("confirmed_at"),
+        }, ""
+    return None, "NOT_FOUND"
+
+
 def validate_reidentification_token(token_ref: str, initiating_duid: str) -> tuple[str | None, str]:
     """Validate a cross-DUID reidentification token.
     Returns (ir, error). ir is None on error.
