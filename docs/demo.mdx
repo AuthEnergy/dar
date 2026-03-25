@@ -1,0 +1,89 @@
+---
+title: Running the Demo
+sidebarTitle: Demo
+description: A walkthrough of the DAR reference implementation running locally.
+icon: play
+tag: experimental
+---
+
+<Warning>
+  The demo runs entirely on `localhost` and uses pre-seeded fictional data. It is not connected to any real meter data or identity systems.
+</Warning>
+
+The reference implementation ships with a Docker Compose stack and a seed script that populates five realistic access records across four organisations — covering all key record states and legal bases. Three browser interfaces are included.
+
+See [GitHub](https://github.com/AuthEnergy/dar) for setup instructions.
+
+---
+
+## Central Admin Portal
+
+`localhost:5001/admin` — operator view across all registered Data Users.
+
+![DAR Admin Dashboard](./central_admin_portal.png)
+
+The dashboard shows aggregate counts across the register — active accounts, active and revoked access records, and webhook subscriptions — alongside a live audit feed of all recent API activity. The audit log records every account creation, record registration, revocation, and identity event with timestamps and actor attribution.
+
+The **Accounts** section lists all registered Data Users with their DUID, role, and status. Accounts can be suspended and reactivated. New accounts can be provisioned directly from the UI.
+
+The **Access Records** section provides a cross-account search by MPxN or access key, filterable by state and legal basis.
+
+---
+
+## Customer Portal
+
+`localhost:5001/portal` — the customer transparency view for a given meter point.
+
+![Customer Portal](./customer_portal.png)
+
+The portal lists every organisation with a registered or detected access record for the meter point, regardless of which Data User registered it. The demo MPxN `2312345678901` shows all five record states in a single view:
+
+| Organisation | State | Legal basis |
+|---|---|---|
+| Bright Energy Ltd | ACTIVE | Consent — Withdraw button |
+| OctopusFlux Ltd | ACTIVE | Consent — Withdraw button |
+| Northern Networks plc | ACTIVE | Public task — no expiry, Contact link only |
+| Acme Energy Services Ltd | DETECTED | Unregistered — DCC discovered access |
+| GreenSwitch Analytics | EXPIRED | Consent — greyed, no action |
+
+A purple banner appears when the DCC has detected unregistered access. Customers can withdraw consent directly from the portal — clicking **Withdraw** prompts for a reason, transitions the record to `REVOKED`, and fires a `consent.withdrawal` webhook to the Data User.
+
+---
+
+## Data User Dashboard
+
+`localhost:5001/dashboard` — self-service view for a registered Data User.
+
+![Data User Dashboard](./data_user_portal.png)
+
+Each Data User sees only their own records. The **Access Records** tab lists records with state, legal basis, MPxN, and expiry — with a drawer for full record detail and revocation. The **Webhooks** tab allows subscription management. The **Account** section shows the profile and allows secret key rotation.
+
+Sign in with any of the seeded Data User accounts:
+
+| Account ID | Secret Key | Organisation |
+|---|---|---|
+| `bright_energy` | `bright-secret-demo` | Bright Energy Ltd |
+| `octopusflux` | `octopus-secret-demo` | OctopusFlux Ltd |
+| `northern_networks` | `northern-secret-demo` | Northern Networks plc |
+| `greenswitch` | `greenswitch-secret-demo` | GreenSwitch Analytics |
+
+---
+
+## API
+
+All three interfaces call the same REST API. The full OpenAPI spec is at `docs/api/openapi-dar.yaml`. A quick end-to-end test via curl:
+
+```bash
+# Get a token
+TOKEN=$(curl -s -u bright_energy:bright-secret-demo \
+  http://localhost:5001/v1/auth/token \
+  | python3 -c "import sys,json; print(json.load(sys.stdin)['bearer-token'])")
+
+# List all records for the demo meter point
+curl -s -H "Authorization: Bearer $TOKEN" \
+  http://localhost:5001/v1/meter-points/2312345678901/access-records \
+  | python3 -m json.tool
+
+# Verify a record as a Data Provider (no auth required)
+curl -s http://localhost:5001/v1/access-records/<ak> | python3 -m json.tool
+```
