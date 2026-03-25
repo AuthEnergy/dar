@@ -15,9 +15,14 @@ This is distinct from a Data User showing a customer their own records. A portal
 
 A registered portal account can call `GET /meter-points/{mpxn}/access-records` for any MPxN — returning all Data Users' records, discovered access, and record states — provided the customer has actively confirmed their identity via a re-identification challenge.
 
-A portal operator cannot:
+A portal operator **can**:
 
-- Register, update, or revoke Access Records (those actions belong to Data Users)
+- Query any meter point on behalf of a confirmed customer
+- Revoke consent-based Access Records on a customer's behalf (the Withdraw action). The register fires a `consent.withdrawal` webhook to the Data User immediately.
+
+A portal operator **cannot**:
+
+- Register or update Access Records — those actions belong to Data Users
 - Query a meter point without a confirmed re-identification token
 - See PII from Identity Records — only the access summary is returned
 
