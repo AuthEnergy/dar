@@ -74,7 +74,7 @@ info:
     \ except `GET /access-records/{ak}` require a bearer token from\n`GET /auth/token`.\
     \ Tokens expire after 7200 seconds.\n\n## Versioning\n\nURI-based versioning.\
     \ Current version: `v1`.\n"
-  version: 0.0.15
+  version: 0.0.16
   contact:
     name: Auth Energy
     email: contact@auth.energy
