@@ -41,6 +41,27 @@ def list_own_records(token_payload):
 @require_bearer("data_user")
 def create_access_record(token_payload):
     body   = request.get_json(silent=True) or {}
+    reid_token = body.pop("reidentification-token", None)
+
+    # Cross-DUID: if a reidentification-token is supplied, validate it and
+    # resolve the ir internally. identity-record-ref is not required in this case.
+    if reid_token:
+        ir, error = db.validate_reidentification_token(reid_token, token_payload["duid"])
+        if error == "NOT_FOUND":
+            return err("reidentification-token not found", 404, "NOT001")
+        if error == "FORBIDDEN":
+            return err("reidentification-token was not initiated by this Data User", 403, "AUTH003")
+        if error == "NOT_CONFIRMED":
+            return err("reidentification-token has not been confirmed by the customer yet", 422, "VAL002")
+        if error == "ALREADY_USED":
+            return err("reidentification-token has already been used", 409, "CON001")
+        if error == "EXPIRED":
+            return err("reidentification-token has expired (valid for 1 hour)", 422, "VAL002")
+        if error:
+            return err(f"reidentification-token invalid: {error}", 400, "VAL001")
+        # Inject the resolved ir into the payload
+        body.setdefault("record-metadata", {})["identity-record-ref"] = ir
+
     errors = validate_access_record(body)
     if errors:
         return err("; ".join(errors), 400, "VAL001")
@@ -48,7 +69,8 @@ def create_access_record(token_payload):
     doc    = db.create_access_record(token_payload["duid"], body)
     ak     = doc["ak"]
     expiry = body.get("access-event", {}).get("expiry")
-    _audit(token_payload, "record.created", {"ak": ak, "mpxn": doc.get("mpxn")})
+    _audit(token_payload, "record.created", {"ak": ak, "mpxn": doc.get("mpxn"),
+                                              "cross_duid": bool(reid_token)})
 
     resp = ok({
         "response":     meta(f"/v1/access-records/{ak}"),

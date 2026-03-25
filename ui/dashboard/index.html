@@ -495,7 +495,7 @@ function renderRecords(list) {
     tr.style.cursor = 'pointer';
     tr.innerHTML = `
       <td class="td-mono" style="font-size:11px">${rec.ak}</td>
-      <td>${rec.controller||'—'}</td>
+      <td>${rec['lead-controller-name']||'—'}</td>
       <td class="td-mono">${rec.mpxn||'—'}</td>
       <td><span class="badge badge-grey badge-mono">${rec['legal-basis']||'—'}</span></td>
       <td>${stateBadge(rec.state)}</td>
@@ -517,7 +517,7 @@ function openRecDrawer(ak) {
         ['MPxN', rec.mpxn], ['Created', fmtDate(rec['created-at'])],
         ...(rec['revoked-at'] ? [['Revoked', fmtDate(rec['revoked-at'])]] : []),
       ]},
-      { title: 'Controller', rows: [['Name', `<span style="font-family:var(--sans)">${rec.controller||'—'}</span>`]] },
+      { title: 'Controller', rows: [['Name', `<span style="font-family:var(--sans)">${rec['lead-controller-name']||'—'}</span>`]] },
       { title: 'Processing', rows: [
         ['Legal Basis', rec['legal-basis']],
         ['Purpose', `<span style="font-family:var(--sans)">${rec.purpose||'—'}</span>`],

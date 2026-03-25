@@ -529,16 +529,21 @@ async function loadPortal() {
 
 // ── Render ────────────────────────────────────────────────────────────────────
 function renderPortal(records, mpxn) {
-  const active     = records.filter(r => r.state === 'ACTIVE').length;
-  const discovered = records.filter(r => r.state === 'DISCOVERED').length;
-  const expired    = records.filter(r => r.state === 'EXPIRED' || r.state === 'REVOKED').length;
+  // Normalise client-side expiry before counting pills
+  const normalised = records.map(r => ({
+    ...r,
+    state: (r.state === 'ACTIVE' && r.expiry && new Date(r.expiry) < new Date()) ? 'EXPIRED' : r.state
+  }));
+  const active     = normalised.filter(r => r.state === 'ACTIVE').length;
+  const discovered = normalised.filter(r => r.state === 'DISCOVERED').length;
+  const expired    = normalised.filter(r => r.state === 'EXPIRED' || r.state === 'REVOKED').length;
 
   document.getElementById('pill-active').textContent     = active;
   document.getElementById('pill-discovered').textContent = discovered;
   document.getElementById('pill-expired').textContent    = expired;
 
   // Discovered banner
-  const discRecs = records.filter(r => r.state === 'DISCOVERED');
+  const discRecs = normalised.filter(r => r.state === 'DISCOVERED');
   if (discRecs.length) {
     const orgs = discRecs.map(r =>
       `<span class="org-highlight">${r['discovered-access']?.['organisation-name'] || '—'}</span>`
@@ -554,11 +559,11 @@ function renderPortal(records, mpxn) {
 
   // Sort: ACTIVE consent first, then ACTIVE other, then DISCOVERED, then EXPIRED/REVOKED
   const sorted = [
-    ...records.filter(r => r.state === 'ACTIVE' && r['legal-basis']?.includes('consent')),
-    ...records.filter(r => r.state === 'ACTIVE' && !r['legal-basis']?.includes('consent')),
-    ...records.filter(r => r.state === 'DISCOVERED'),
-    ...records.filter(r => r.state === 'EXPIRED'),
-    ...records.filter(r => r.state === 'REVOKED'),
+    ...normalised.filter(r => r.state === 'ACTIVE' && r['legal-basis']?.includes('consent')),
+    ...normalised.filter(r => r.state === 'ACTIVE' && !r['legal-basis']?.includes('consent')),
+    ...normalised.filter(r => r.state === 'DISCOVERED'),
+    ...normalised.filter(r => r.state === 'EXPIRED'),
+    ...normalised.filter(r => r.state === 'REVOKED'),
   ];
 
   const rows = sorted.map(rec => buildRow(rec)).join('');

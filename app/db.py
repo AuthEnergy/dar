@@ -214,6 +214,131 @@ def lookup_identity_records(duid: str, mpxn: str = None,
             email.lower().encode()).hexdigest()
     return _find("dar_identity", selector)
 
+def check_identity_record_exists(mpxn: str) -> bool:
+    """Check if ANY identity record exists for this MPxN across all Data Users.
+    Returns True/False only — no ir key or PII exposed."""
+    docs = _find("dar_identity", {"type": "identity_record", "mpxn": mpxn}, 1)
+    return len([d for d in docs if not d.get("anonymised_at")]) > 0
+
+def initiate_reidentify_by_mpxn(mpxn: str, initiating_duid: str, method: str,
+                                  redirect_url: str = None,
+                                  passkey_return_url: str = None,
+                                  display_name: str = None) -> tuple[dict | None, str]:
+    """Initiate re-identification for a customer by MPxN, without exposing the ir.
+    Used by Data User B to re-use an existing Identity Record from another Data User.
+    The ir is resolved internally — never returned to the caller.
+    display_name is the initiating Data User's name shown to the customer."""
+    # Find the identity record for this MPxN (any Data User)
+    docs = _find("dar_identity", {"type": "identity_record", "mpxn": mpxn})
+    active = [d for d in docs if not d.get("anonymised_at")]
+    if not active:
+        return None, "NOT_FOUND"
+
+    # Use the most recently created record
+    doc = sorted(active, key=lambda d: d.get("created_at", ""), reverse=True)[0]
+    ir  = doc["ir"]
+
+    import secrets as _secrets
+    token_ref = _gen("mlr")
+    now = _now()
+
+    if method == "magic-link":
+        if not doc.get("has_email"):
+            return None, "NO_EMAIL"
+        tokens = doc.get("pending_reidentify_tokens", {})
+        tokens[token_ref] = {
+            "method":           "magic-link",
+            "status":           "pending",
+            "created_at":       now,
+            "redirect_url":     redirect_url,
+            "initiating_duid":  initiating_duid,
+            "cross_duid":       True,
+            "display_name":     display_name,
+        }
+        doc["pending_reidentify_tokens"] = tokens
+        _put("dar_identity", doc)
+        return {
+            "method":      "magic-link",
+            "magic-link": {
+                "dispatched-to": "c*****r@example.com",
+                "expires-at":    now,
+                "token-ref":     token_ref,
+                "redirect-url":  redirect_url,
+            },
+            "passkey": None,
+        }, ""
+
+    elif method in ("passkey-assert", "passkey-register"):
+        if method == "passkey-assert" and not doc.get("credentials"):
+            return None, "NO_CREDENTIALS"
+        tokens = doc.get("pending_reidentify_tokens", {})
+        tokens[token_ref] = {
+            "method":           method,
+            "status":           "pending",
+            "created_at":       now,
+            "return_url":       passkey_return_url,
+            "initiating_duid":  initiating_duid,
+            "cross_duid":       True,
+            "display_name":     display_name,
+        }
+        doc["pending_reidentify_tokens"] = tokens
+        _put("dar_identity", doc)
+        return {
+            "method":      method,
+            "magic-link":  None,
+            "passkey": {
+                "redirect-url": f"{Config.PORTAL_BASE_URL}/passkey/assert?session={_gen('pks')}",
+                "token-ref":    token_ref,
+                "expires-at":   now,
+                "return-url":   passkey_return_url,
+            },
+        }, ""
+
+    return None, "INVALID_METHOD"
+
+def validate_reidentification_token(token_ref: str, initiating_duid: str) -> tuple[str | None, str]:
+    """Validate a cross-DUID reidentification token.
+    Returns (ir, error). ir is None on error.
+    Token must be confirmed, cross_duid, initiated by this duid, and single-use."""
+    from datetime import timezone
+    import dateutil.parser
+
+    # Find the identity record containing this token
+    # We store tokens on the identity record — scan for it
+    all_irs = _find("dar_identity", {"type": "identity_record"}, 500)
+    for doc in all_irs:
+        tokens = doc.get("pending_reidentify_tokens", {})
+        if token_ref not in tokens:
+            continue
+        token = tokens[token_ref]
+
+        if token.get("initiating_duid") != initiating_duid:
+            return None, "FORBIDDEN"
+        if not token.get("cross_duid"):
+            return None, "NOT_CROSS_DUID"
+        if token.get("status") != "confirmed":
+            return None, "NOT_CONFIRMED"
+        if token.get("consumed"):
+            return None, "ALREADY_USED"
+
+        # Check not expired — tokens valid for 1 hour
+        try:
+            age = (datetime.now(timezone.utc) -
+                   dateutil.parser.isoparse(token["created_at"])).total_seconds()
+            if age > 3600:
+                return None, "EXPIRED"
+        except Exception:
+            pass
+
+        # Mark as consumed
+        token["consumed"] = True
+        tokens[token_ref] = token
+        doc["pending_reidentify_tokens"] = tokens
+        _put("dar_identity", doc)
+        return doc["ir"], ""
+
+    return None, "NOT_FOUND"
+
 def anonymise_identity_record(ir: str, duid: str) -> tuple[dict | None, str]:
     """
     Returns (doc, error). error is '' on success, 'NOT_FOUND' or 'CONFLICT'.
@@ -335,9 +460,12 @@ def _lead_controller_name(payload: dict) -> str:
             return c.get("name", "")
     return ""
 
-def _extract_mpxn(ir_ref: str, duid: str) -> str:
-    """Resolve mpxn from identity record."""
-    ir_doc = _find("dar_identity", {"ir": ir_ref, "duid": duid})
+def _extract_mpxn(ir_ref: str, duid: str = None) -> str:
+    """Resolve mpxn from identity record. duid=None allows cross-DUID lookup."""
+    selector = {"ir": ir_ref}
+    if duid:
+        selector["duid"] = duid
+    ir_doc = _find("dar_identity", selector)
     if ir_doc:
         return ir_doc[0].get("mpxn", "")
     return ""
