@@ -6,15 +6,14 @@ icon: user
 ---
 
 <Warning>
-The Customer Consent Portal is a planned component of the Data Access Register. This document describes the proposed design for review and feedback. It can complement or replace the Data User in-app presentation of access records via [List Access Records](/api-reference/data-users/list-access-records-for-a-meter-point).
+The Customer Consent Portal is an implemented and fully operational component of the Data Access Register. This document describes the proposed design for review and feedback. It can suppliment or replace the Data User in-app presentation of access records via [List Access Records](/api-reference/data-users/list-access-records-for-a-meter-point) which is limited to only that Data Users records.
 
 Key design principles:
 
-- The portal is operated by the Central Register, not by individual Data Users
+- The portal is operated by the Central Register, not by individual Data Users but can be operated by any [authorised portal operator](portal-operators)
 - Customers access it directly at a published URL, or via a link from any Data User application
 - The portal authenticates the customer itself — no session token is issued by the Data User
-- All consent management actions taken in the portal are reflected immediately in the register
-- The portal cannot be embedded in an iframe by any party, including Data Users
+- All consent management actions taken in the portal are reflected immediately in the register, Data Users are notified via webhooks directly
 - The portal is read-only with respect to granting new access — consent is always obtained by the Data User
 </Warning>
 
