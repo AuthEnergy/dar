@@ -222,7 +222,7 @@ This is an open design proposal. Feedback and contributions are welcome — open
 
 ## License
 
-See [LICENSE](LICENSE).
+See [LICENSE](LICENSE.md).
 
 ---
 
