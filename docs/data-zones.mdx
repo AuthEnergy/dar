@@ -13,33 +13,39 @@ This framework establishes three concentric governance zones for smart meter per
 
 ```mermaid
 graph TD
-    subgraph Z1["Zone 1 — SEC parties · SEC + PCF + UK GDPR"]
+    Z1H["Zone 1 — SEC perimeter · SEC · PCF · UK GDPR"]
+    subgraph Z1[" "]
         A["DCC · Suppliers · DNOs · Other Users"]
         B["e.g. Octopus, National Grid, n3rgy, Hildebrand"]
     end
 
-    subgraph Z2["Zone 2 — Contractual extension · MDA + UK GDPR"]
+    Z2H["Zone 2 — Contractual extension · MDA · UK GDPR"]
+    subgraph Z2[" "]
         C["App providers · Aggregators · Sub-processors"]
-        D["e.g. Mixergy, uSwitch, Loop"]
+        D["e.g. uSwitch, Mixergy, Loop, Geo Together"]
     end
 
-    subgraph Z3["Zone 3 — Beyond sector reach · UK GDPR only"]
-        E["Independent controllers · Anonymised data · Derived datasets"]
-        F["e.g. price comparison sites, research bodies, ad-tech"]
+    Z3H["Zone 3 — Beyond sector reach · UK GDPR only"]
+    subgraph Z3[" "]
+        E["Independent controllers · Anonymised · Derived data"]
+        F["e.g. price comparison, research bodies, ad-tech"]
     end
 
-    Z1 -->|"MDA required\nbefore disclosure"| Z2
-    Z2 -->|"GDPR only\nno sector reach"| Z3
+    Z1H --> Z1
+    Z1 -->|"MDA required before disclosure"| Z2H
+    Z2H --> Z2
+    Z2 -->|"GDPR only · no sector reach"| Z3H
+    Z3H --> Z3
 
-    style Z1 fill:#f3f0ff,stroke:#7c6fcf,stroke-width:1.5px,color:#3c2f8a
-    style Z2 fill:#e8f8f2,stroke:#1d9e75,stroke-width:1.5px,color:#085041
-    style Z3 fill:#f1efea,stroke:#888780,stroke-width:1.5px,color:#2c2c2a
+    style Z1H fill:#e8e4ff,stroke:#7c6fcf,stroke-width:1.5px,color:#3c2f8a
+    style Z2H fill:#d4f2e7,stroke:#1d9e75,stroke-width:1.5px,color:#085041
+    style Z3H fill:#e8e6e0,stroke:#888780,stroke-width:1.5px,color:#2c2c2a
+    style Z1 fill:#f3f0ff,stroke:#7c6fcf,stroke-width:1px,color:#3c2f8a
+    style Z2 fill:#e8f8f2,stroke:#1d9e75,stroke-width:1px,color:#085041
+    style Z3 fill:#f1efea,stroke:#888780,stroke-width:1px,color:#2c2c2a
 ```
 
----
-
 ## Zone 1 — Inside the SEC perimeter
-
 **Direct parties**: DCC, Suppliers, DNOs/DSOs, Other Users, accredited intermediaries (including DCC service agents and CAD-layer parties who are themselves SEC parties).
 
 **Applicable obligations**: SEC (including the Privacy Control Framework (PCF)) + UK GDPR, cumulatively. The PCF is the privacy obligation framework within the SEC applicable to all parties — a valid UK GDPR lawful basis does not override a PCF purpose restriction.
@@ -53,16 +59,13 @@ graph TD
 
 **Boundary justification**: Parties in Zone 1 have signed the SEC or operate under Ofgem licence. The obligations are the quid pro quo for market access.
 
----
 
 ## Zone 1 → Zone 2: The first boundary
-
 This line may only be crossed with a **Minimum Data Agreement (MDA)** in place. The SEC Party must execute an MDA before disclosing personal smart meter data to any downstream recipient. The obligation sits on the SEC Party — not the recipient, who has not consented to SEC governance and cannot reasonably be required to seek SEC accreditation to receive a data feed. The DAR holds registration details of onward parties.
 
 <Note>The **Minimum Data Agreement (MDA)** is an extension to the obligations on SEC Parties who contract with other organisations that wish to access personal data.</Note>
 
 ### MDA minimum terms (flowing down from Zone 1 obligations)
-
 | Term | Requirement |
 |---|---|
 | Purpose limitation | Downstream use must be compatible with the original consent or lawful basis |
@@ -73,17 +76,13 @@ This line may only be crossed with a **Minimum Data Agreement (MDA)** in place. 
 | Termination | SEC Party may terminate and require certified data deletion on MDA breach |
 
 ### What does not flow down
-
 Full SEC accreditation requirements, SEC/DAR consumer-facing consent mechanics, and SEC governance obligations do not apply to Zone 2 recipients. Imposing these on a non-party would be disproportionate and practically unworkable.
 
 ### Reputational liability
-
 If a Zone 2 party suffers a breach and the SEC Party can produce its MDA and demonstrate it exercised adequate due diligence, the reputational and regulatory line is defensible. If the SEC Party failed to impose or enforce MDA terms, residual Zone 1 liability is appropriate. The MDA forms part of the SEC Party's annual privacy audit cycle.
 
----
 
 ## Zone 2 — Contractual extension
-
 **Parties**: App providers, ESCOs, flexibility aggregators, sub-processors (analytics platforms, cloud infrastructure), and HAN/CAD-layer OEMs not themselves SEC parties.
 
 **Applicable obligations**:
@@ -95,24 +94,18 @@ ICO retains full UK GDPR enforcement powers over any UK-established entity in Zo
 
 Where a Zone 2 party itself engages a sub-processor (for example, an app provider using a cloud analytics platform), the MDA onward disclosure term requires equivalent MDA terms to be imposed on that sub-processor. This creates a Zone 2 chain — it does not constitute a Zone 3 exit. The originating SEC Party's audit and termination rights should be capable of flowing through the chain.
 
----
 
 ## Zone 2 → Zone 3: The second boundary
-
 This line is drawn by the **character of the data**, not the identity of the party holding it.
 
 ### Transformed or derived data
-
 If a Zone 2 party derives a new dataset from smart meter consumption data — behavioural profiles, occupancy inference, asset identification — they become an independent controller of that derived dataset. The original consent does not extend to it. Article 5(1)(b) purpose limitation very likely prohibits use for purposes incompatible with the original energy management or billing purpose. The MDA should explicitly state that derived datasets require a fresh lawful basis and are not covered by the original consent grant.
 
 ### Genuinely anonymised data
-
 Data that has been irreversibly anonymised to ICO standard exits UK GDPR scope entirely, and all flow-down obligations terminate. The risk is miscategorisation: pseudonymised data is not anonymous data, and sparse rural meter cohorts can be re-identified even at groups of three. The MDA should require the Zone 2 party to conduct and document an anonymisation assessment before claiming this exemption.
 
----
 
 ## Zone 3 — Beyond sector reach
-
 **Parties**: Independent controllers processing for their own purposes; parties holding genuinely anonymised datasets; parties holding transformed or derived data with no connection to the original consent chain.
 
 **Applicable obligations**: UK GDPR only, enforced directly by ICO. No SEC or contractual sector obligations apply.
@@ -129,12 +122,9 @@ Some data and some harms will reach Zone 3. The appropriate policy response is n
 | Zone 1 → Zone 2 | Proportionality — obligation on the SEC Party, not accreditation of the recipient | Minimum Data Agreement (MDA) |
 | Zone 2 → Zone 3 | Data character — UK GDPR sufficiency for independent controllers is mature and enforced | UK GDPR Article 5, ICO anonymisation standard |
 
----
 
-## Notes on the multi-controller problem
+<Info>
+## Multi-controller problem
 
 Unlike financial services, smart meter data has multiple independent origination points. The DCC, suppliers, DNOs, and accredited Other Users all have direct legal access to meter data — none controls the others' data flows. This means a single-apex chain-of-trust model (as used in HIPAA) does not map cleanly. The MDA framework addresses this by placing the obligation on whichever Zone 1 party makes a specific downstream disclosure, rather than attempting to identify a single originating controller. Each disclosing party is responsible for its own MDA obligations regardless of how many other Zone 1 parties may also hold the same data.
-
----
-
-*Framework version 1.1 — for consultation and modification context use*
+</Info>
