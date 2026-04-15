@@ -13,37 +13,23 @@ This framework establishes three concentric governance zones for smart meter per
 
 ```mermaid
 graph TD
-    subgraph Z1["Zone 1 — SEC perimeter (SEC + PCF + UK GDPR)"]
-        DCC["DCC\nInfrastructure controller"]
-        SUP["Suppliers\nBilling + consent controllers"]
-        DNO["DNOs / DSOs\nNetwork controllers"]
-        OU["Other Users\nAccredited third parties"]
-        INT["Intermediaries\nDCC service agents / CAD parties"]
+    subgraph Z1["Zone 1 — SEC perimeter · SEC + PCF + UK GDPR"]
+        A["DCC · Suppliers · DNOs · Other Users"]
+        B["e.g. Octopus, National Grid, n3rgy"]
     end
 
-    subgraph Z2["Zone 2 — Contractual extension (MDA + UK GDPR)"]
-        APP["App providers / ESCOs\nFlexibility aggregators"]
-        SUB["Sub-processors\nAnalytics / cloud / API platforms"]
-        HAN["HAN / CAD recipients\nDevice OEMs / HEMS vendors"]
+    subgraph Z2["Zone 2 — Contractual extension · MDA + UK GDPR"]
+        C["App providers · Aggregators · Sub-processors"]
+        D["e.g. Hildebrand, Mixergy, Tesla Energy"]
     end
 
-    subgraph Z3["Zone 3 — Beyond sector reach (UK GDPR only)"]
-        IND["Independent controllers\nOwn-purpose processing"]
-        ANO["Anonymised datasets\nOutside UK GDPR scope"]
-        DER["Derived / transformed data\nFresh lawful basis required"]
+    subgraph Z3["Zone 3 — Beyond sector reach · UK GDPR only"]
+        E["Independent controllers · Anonymised data · Derived datasets"]
+        F["e.g. price comparison sites, research bodies, ad-tech"]
     end
 
-    DCC -->|"MDA required"| APP
-    SUP -->|"MDA required"| APP
-    SUP -->|"MDA required"| SUB
-    OU  -->|"MDA required"| APP
-    OU  -->|"MDA required"| SUB
-    INT -->|"MDA required"| HAN
-
-    APP -->|"Independent controller\nor anonymisation"| IND
-    APP -->|"Independent controller\nor anonymisation"| ANO
-    SUB -->|"Derived dataset —\nnew lawful basis"| DER
-    HAN -->|"Independent controller\nor anonymisation"| IND
+    Z1 -->|"MDA required\nbefore disclosure"| Z2
+    Z2 -->|"GDPR only\nno sector reach"| Z3
 
     style Z1 fill:#f3f0ff,stroke:#7c6fcf,stroke-width:1.5px,color:#3c2f8a
     style Z2 fill:#e8f8f2,stroke:#1d9e75,stroke-width:1.5px,color:#085041
